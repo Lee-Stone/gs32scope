@@ -1,0 +1,174 @@
+#include "monitor_model.h"
+#include <functional>
+
+namespace {
+const QColor kColors[] = {
+    QColor(0x2F, 0xD8, 0x58), QColor(0x3F, 0xB9, 0xFF),
+    QColor(0xFF, 0xB4, 0x2E), QColor(0xFF, 0x5C, 0x7A),
+    QColor(0xC8, 0x8A, 0xFF), QColor(0x2E, 0xE6, 0xD6),
+};
+}
+
+MonitorModel::MonitorModel(QObject* parent) : QObject(parent) {}
+MonitorModel::~MonitorModel() { clear(); }
+
+QColor MonitorModel::nextColor() {
+    const QColor c = kColors[colorIdx_ % 6];
+    ++colorIdx_;
+    return c;
+}
+
+int MonitorModel::addFlatLeaf(const QString& path, const VariableDef& d, int rootIdx) {
+    MonitorLeaf lf;
+    lf.path = path;
+    lf.def = d;
+    lf.rootIdx = rootIdx;
+    leaves_.append(lf);
+    const int idx = leaves_.size() - 1;
+    leafIdx_.insert(path, idx);
+    roots_.at(rootIdx)->leaves.append(idx);
+    return idx;
+}
+
+/* 由 DwarfVar 构建显示树节点, 叶子同时入扁平表 */
+MonitorNode* MonitorModel::buildNode(const DwarfVar& v, const QString& prefix,
+                                     QVector<int>& flatLeaves, int rootIdx) {
+    auto* node = new MonitorNode();
+    node->name = shortVarName(v.name);
+    node->path = prefix.isEmpty() ? v.name : prefix + "." + v.name;
+    node->def.name = node->path;
+    node->def.addr = v.addr;
+    node->def.size = v.size;
+    node->def.type = v.type;
+    node->def.bitOffset = v.bitOffset;
+    node->def.bitWidth = v.bitWidth;
+    node->isStruct = v.isStruct;
+    if (v.isStruct) {
+        for (const auto& m : v.members)
+            node->children.append(buildNode(m, node->path, flatLeaves, rootIdx));
+    } else {
+        node->leafIdx = addFlatLeaf(node->path, node->def, rootIdx);
+        flatLeaves.append(node->leafIdx);
+    }
+    return node;
+}
+
+void MonitorModel::addLeafRoot(const VariableDef& v) {
+    auto* r = new MonitorRoot();
+    r->name = v.name;
+    r->typeText = QString::fromLatin1(typeName(v.type));
+    r->addr = v.addr; r->size = v.size;
+    r->isStruct = false;
+    r->color = nextColor();
+    roots_.append(r);
+    r->tree = new MonitorNode();
+    r->tree->name = shortVarName(v.name);
+    r->tree->path = v.name;
+    r->tree->def = v;
+    r->tree->isStruct = false;
+    r->tree->leafIdx = addFlatLeaf(v.name, v, roots_.size() - 1);
+    emit changed();
+}
+
+void MonitorModel::addDwarfRoot(const DwarfVar& v) {
+    auto* r = new MonitorRoot();
+    r->name = v.name;
+    r->addr = v.addr; r->size = v.size;
+    r->isStruct = v.isStruct;
+    r->typeText = v.isStruct ? "struct" : QString::fromLatin1(typeName(v.type));
+    r->color = nextColor();
+    roots_.append(r);
+    QVector<int> flat;
+    r->tree = buildNode(v, QString(), flat, roots_.size() - 1);
+    emit changed();
+}
+
+int MonitorModel::addDrawOnlyRoot(const VariableDef& v) {
+    auto* r = new MonitorRoot();
+    r->name = v.name;
+    r->typeText = QString::fromLatin1(typeName(v.type));
+    r->addr = v.addr; r->size = v.size;
+    r->isStruct = false;
+    r->color = nextColor();
+    roots_.append(r);
+    r->tree = new MonitorNode();
+    r->tree->name = shortVarName(v.name);
+    r->tree->path = v.name;
+    r->tree->def = v;
+    r->tree->isStruct = false;
+    const int li = addFlatLeaf(v.name, v, roots_.size() - 1);
+    leaves_[li].monitored = false;
+    leaves_[li].shown = true;   /* 绘制专用: 默认进绘制列表 */
+    r->tree->leafIdx = li;
+    emit changed();
+    return li;
+}
+
+void MonitorModel::setLeafMonitored(int leafIdx, bool m) {
+    if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    leaves_[leafIdx].monitored = m;
+    emit changed();   /* 监控树需刷新(显示/隐藏该行) */
+}
+
+void MonitorModel::removeRoot(int rootIdx) {
+    if (rootIdx < 0 || rootIdx >= roots_.size()) return;
+    for (int li : roots_.at(rootIdx)->leaves)
+        leafIdx_.remove(leaves_.at(li).path);
+    delete roots_.at(rootIdx);
+    roots_.removeAt(rootIdx);
+    /* 重建叶子表: 按剩余根的顺序收集 */
+    QVector<MonitorLeaf> keep;
+    QHash<QString, int>  newIdx;
+    for (int ri = 0; ri < roots_.size(); ++ri) {
+        MonitorRoot* r = roots_[ri];
+        QVector<int> newList;
+        for (int oldLi : r->leaves) {
+            MonitorLeaf l = leaves_.at(oldLi);
+            l.rootIdx = ri;
+            const int ni = keep.size();
+            keep.append(l);
+            newList.append(ni);
+            newIdx.insert(l.path, ni);
+        }
+        r->leaves = newList;
+    }
+    leaves_ = keep;
+    leafIdx_ = newIdx;
+    /* 同步节点树里的 leafIdx(removeRoot 后扁平下标已重排) */
+    std::function<void(MonitorNode*)> remap = [&](MonitorNode* n) {
+        if (!n->isStruct && n->leafIdx >= 0)
+            n->leafIdx = leafIdx_.value(n->path, -1);
+        for (MonitorNode* c : n->children) remap(c);
+    };
+    for (MonitorRoot* r : roots_) if (r->tree) remap(r->tree);
+    emit changed();
+}
+
+void MonitorModel::clear() {
+    for (MonitorRoot* r : roots_) delete r;
+    roots_.clear();
+    leaves_.clear(); leafIdx_.clear(); colorIdx_ = 0;
+    emit changed();
+}
+
+void MonitorModel::updateLeafValue(int leafIdx, double v) {
+    if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    MonitorLeaf& l = leaves_[leafIdx];
+    l.cur = v;
+    if (l.n == 0) { l.min = l.max = v; }
+    else { if (v < l.min) l.min = v; if (v > l.max) l.max = v; }
+    l.sum += v;
+    ++l.n;
+    emit leafValueChanged(leafIdx);
+}
+
+void MonitorModel::setLeafShown(int leafIdx, bool on) {
+    if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    leaves_[leafIdx].shown = on;
+    emit leafShownChanged(leafIdx);
+}
+
+void MonitorModel::resetStats() {
+    for (auto& l : leaves_) { l.n = 0; l.sum = 0; l.cur = l.min = l.max = 0; }
+    emit changed();
+}

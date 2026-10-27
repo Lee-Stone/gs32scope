@@ -1,0 +1,15 @@
+# Build
+build/
+build-*/
+out/
+*.o
+*.obj
+*.exe
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.user

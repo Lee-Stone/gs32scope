@@ -108,7 +108,7 @@
    <addaction name="separator"/>
    <widget class="QLabel" name="labelInterval">
     <property name="text">
-     <string> 采样间隔(ms): </string>
+     <string> 采样率(Hz): </string>
     </property>
    </widget>
    <widget class="SpinBox" name="intervalSpin">
@@ -118,8 +118,11 @@
     <property name="maximum">
      <number>10000</number>
     </property>
+    <property name="singleStep">
+     <number>10</number>
+    </property>
     <property name="value">
-     <number>20</number>
+     <number>50</number>
     </property>
    </widget>
    <addaction name="separator"/>

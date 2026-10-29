@@ -91,6 +91,33 @@ public:
     }
     QString lastErrorText() const { return lastError_; }
 
+    /* ---- STREAM 透传 ---- */
+    bool configStream(uint32_t periodNs, const gs32_mem_region_t* regions, uint32_t count,
+                      const gs32_flush_policy_t* policy) {
+        if (!h_ || !fn_config_stream_) { lastError_ = QStringLiteral("STREAM 未实现"); return false; }
+        const int rc = fn_config_stream_(h_, periodNs, regions, count, policy);
+        if (rc != GS32_OK) lastError_ = QString::fromUtf8(fn_last_error_(h_));
+        return rc == GS32_OK;
+    }
+    bool registerNotify(gs32_notify_cb cb, void* user) {
+        if (!h_ || !fn_register_notify_) { lastError_ = QStringLiteral("STREAM 未实现"); return false; }
+        const int rc = fn_register_notify_(h_, cb, user);
+        if (rc != GS32_OK) lastError_ = QString::fromUtf8(fn_last_error_(h_));
+        return rc == GS32_OK;
+    }
+    bool startStream() {
+        if (!h_ || !fn_start_stream_) { lastError_ = QStringLiteral("STREAM 未实现"); return false; }
+        const int rc = fn_start_stream_(h_);
+        if (rc != GS32_OK) lastError_ = QString::fromUtf8(fn_last_error_(h_));
+        return rc == GS32_OK;
+    }
+    bool stopStream() {
+        if (!h_ || !fn_stop_stream_) return false;
+        const int rc = fn_stop_stream_(h_);
+        if (rc != GS32_OK) lastError_ = QString::fromUtf8(fn_last_error_(h_));
+        return rc == GS32_OK;
+    }
+
     /* 诊断统计: 最近一次批量读取的 FT_Write 提交耗时(ms)。
      * 旧驱动无此符号时返回 false(不视为错误) */
     bool lastWriteMs(double* out_ms) {

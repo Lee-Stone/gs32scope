@@ -1,20 +1,61 @@
 #include "monitor_dock.h"
 #include <QAction>
+#include <QApplication>
 #include <QCursor>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMenu>
+#include <QPainter>
 #include <QPushButton>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QStyle>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
 #include <QVBoxLayout>
 #include <functional>
 
 namespace {
 enum { ColDraw = 0, ColName = 1, ColType = 2, ColAddr = 3, ColSize = 4,
        ColVal = 5, ColMax = 6, ColMin = 7, ColAvg = 8 };
-}
+
+/* 复选框列: 默认样式把 indicator 贴左; 这里只画底色/选中态, 把勾选框放在单元格中心 */
+class CenteredCheckDelegate : public QStyledItemDelegate
+{
+public:
+    explicit CenteredCheckDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent) {}
+
+    void paint(QPainter* p, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyleOptionViewItem o = option;
+        initStyleOption(&o, index);
+        const QVariant cs = index.data(Qt::CheckStateRole);
+        if (!cs.isValid()) {
+            QStyledItemDelegate::paint(p, option, index);
+            return;
+        }
+        const Qt::CheckState st = static_cast<Qt::CheckState>(cs.toInt());
+        o.text.clear();
+        o.icon = QIcon();
+        o.features &= ~QStyleOptionViewItem::HasCheckIndicator;
+        QApplication::style()->drawControl(QStyle::CE_ItemViewItem, &o, p, o.widget);
+
+        const int s = 16;
+        QStyleOptionViewItem c = o;
+        c.rect = QRect(option.rect.center().x() - s / 2,
+                       option.rect.center().y() - s / 2, s, s);
+        c.features = QStyleOptionViewItem::None;
+        c.state &= ~(QStyle::State_On | QStyle::State_Off | QStyle::State_NoChange);
+        c.state |= st == Qt::Checked ? QStyle::State_On
+                 : st == Qt::PartiallyChecked ? QStyle::State_NoChange
+                                              : QStyle::State_Off;
+        QApplication::style()->drawPrimitive(QStyle::PE_IndicatorItemViewItemCheck,
+                                             &c, p, o.widget);
+    }
+};
+} // namespace
 
 MonitorDock::MonitorDock(QWidget* parent)
     : QDockWidget("监控变量", parent) {
@@ -41,6 +82,7 @@ MonitorDock::MonitorDock(QWidget* parent)
     tree_->setColumnWidth(ColAvg, 80);
     tree_->header()->setSectionResizeMode(ColName, QHeaderView::Stretch);
     tree_->header()->setDefaultAlignment(Qt::AlignCenter);
+    tree_->setItemDelegateForColumn(ColDraw, new CenteredCheckDelegate(tree_));
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested,
             this, &MonitorDock::onContextMenu);
@@ -60,21 +102,22 @@ MonitorDock::MonitorDock(QWidget* parent)
     lay->setContentsMargins(4, 4, 4, 4);
     lay->setSpacing(4);
     auto* bar = new QHBoxLayout();
+    bar->setSpacing(8);
     auto* addWave = new QPushButton("加入波形", container);
     auto* rmWave = new QPushButton("移出波形", container);
     auto* addVar = new QPushButton("添加变量…", container);
     addWave->setToolTip("把当前选中行(叶子/结构体整组)加入波形");
     rmWave->setToolTip("把当前选中行(叶子/结构体整组)移出波形");
-    addWave->setFixedHeight(26);
-    rmWave->setFixedHeight(26);
-    addVar->setFixedHeight(26);
+    for (auto* b : {addWave, rmWave, addVar}) {
+        b->setFixedHeight(28);
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
     connect(addWave, &QPushButton::clicked, this, [this] { toggleCurrentShown(true); });
     connect(rmWave, &QPushButton::clicked, this, [this] { toggleCurrentShown(false); });
     connect(addVar, &QPushButton::clicked, this, [this] { emit addVariableRequested(); });
-    bar->addWidget(addWave);
-    bar->addWidget(rmWave);
-    bar->addStretch(1);
-    bar->addWidget(addVar);
+    bar->addWidget(addWave, 1);
+    bar->addWidget(rmWave, 1);
+    bar->addWidget(addVar, 1);
     lay->addLayout(bar);
     lay->addWidget(tree_, 1);
     setWidget(container);

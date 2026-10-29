@@ -41,8 +41,12 @@ int main(int argc, char* argv[]) {
 
     MainWindow w;
     w.show();
-    /* --demo: 自动连接 Simulation、加载演示变量、生成电机面板并开始采样 */
-    if (QApplication::arguments().contains(QStringLiteral("--demo")))
+    /* --demo: Simulation + 演示变量 + 电机面板 + POLL 采样
+     * --stream: 同上, 但走 STREAM 10kHz */
+    const QStringList args = QApplication::arguments();
+    if (args.contains(QStringLiteral("--stream")))
+        QMetaObject::invokeMethod(&w, "onStreamDemo", Qt::QueuedConnection);
+    else if (args.contains(QStringLiteral("--demo")))
         QMetaObject::invokeMethod(&w, "onSimDemo", Qt::QueuedConnection);
     return app.exec();
 }

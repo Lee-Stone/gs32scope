@@ -32,6 +32,7 @@
 #include <QTabWidget>
 #include <QToolBar>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 namespace {
@@ -95,9 +96,11 @@ MainWindow::MainWindow() {
     connect(varDialog_, &VariableDialog::displayToggled,
             this, &MainWindow::onDisplayToggled);
 
-    /* 恢复上次会话: 工具栏参数 + 变量对话框(重导入文件 + 重放勾选) */
+    /* 恢复上次会话: 工具栏参数 + 变量对话框(重导入文件 + 重放勾选)。
+     * 首次启动(未完成过正常关闭)保持空白仪表盘/波形; 正常关闭后写入 initialized. */
     {
         QSettings s;
+        const bool initialized = s.value("session/initialized", false).toBool();
         const QString be = s.value("toolbar/backend").toString();
         if (!be.isEmpty())
             for (int i = 0; i < backendBox_->count(); ++i)
@@ -106,12 +109,22 @@ MainWindow::MainWindow() {
                 }
         const int di = ui->deviceBox->findText(s.value("toolbar/device").toString());
         if (di >= 0) ui->deviceBox->setCurrentIndex(di);
-        if (s.contains("toolbar/interval"))
-            intervalSpin_->setValue(s.value("toolbar/interval").toInt());
+        int rate = s.value("toolbar/rate", -1).toInt();
+        if (rate <= 0) {
+            /* 旧版本存的是采样间隔 ms */
+            const int ms = s.value("toolbar/interval", 20).toInt();
+            rate = std::clamp(ms > 0 ? 1000 / ms : 50, 1, 10000);
+        }
+        intervalSpin_->setValue(std::clamp(rate, 1, 10000));
         const int ti = ui->tckBox->findText(s.value("toolbar/tck").toString());
         if (ti >= 0) ui->tckBox->setCurrentIndex(ti);
-        varDialog_->restoreState(s);
-        dashboard_->restoreState(s);
+        if (initialized) {
+            varDialog_->restoreState(s);
+            restoreSessionLeaves(s);
+            dashboard_->restoreState(s);
+        } else {
+            dashboard_->clearAll();   /* 首次启动: 不继承任何仪表盘/波形 */
+        }
         themeMode_ = s.value("appearance/theme", "system").toString();
         applyTheme(themeMode_);
     }
@@ -194,6 +207,7 @@ QString makeStyleSheet(bool dark) {
     q += "QMenu::item:selected{background:" + sel + ";color:" + selText + ";}";
     q += "QMenu::separator{height:1px;background:" + border + ";margin:4px 8px;}";
     q += "QToolBar{background:" + bg + ";border-bottom:1px solid " + border + ";spacing:6px;padding:3px;}";
+    q += "QToolBar QLabel{font-size:14px;}";
     q += "QToolButton{background:" + btn + ";color:" + text + ";border:1px solid " + border2 +
          ";border-radius:4px;padding:4px 10px;}";
     q += "QToolButton:hover{background:" + sel + ";border-color:#5b8def;}";
@@ -202,8 +216,10 @@ QString makeStyleSheet(bool dark) {
     q += "QToolButton::menu-indicator{image:url(" + arrowDown +
          ");width:9px;height:9px;subcontrol-origin:padding;subcontrol-position:right center;right:3px;}";
     q += "QComboBox,QSpinBox,QLineEdit{background:" + panel + ";color:" + text + ";border:1px solid " +
-         border2 + ";border-radius:4px;padding:3px 8px;min-height:22px;}";
+         border2 + ";border-radius:4px;padding:3px 8px;min-height:22px;font-size:14px;}";
     q += "QComboBox{padding-right:24px;}";
+    q += "QSpinBox#intervalSpin{padding-right:0px;}";
+    q += "QSpinBox#intervalSpin::up-button,QSpinBox#intervalSpin::down-button{width:0px;height:0px;border:none;background:transparent;}";
     q += "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:24px;"
          "background:" + spinBtn + ";border-left:1px solid " + border2 +
          ";border-top-right-radius:4px;border-bottom-right-radius:4px;}";
@@ -251,6 +267,9 @@ QString makeStyleSheet(bool dark) {
     q += "QToolTip{background:" + panel + ";color:" + text + ";border:1px solid " + border2 + ";}";
     q += "QComboBox QAbstractItemView{background:" + panel + ";color:" + text + ";border:1px solid " +
          border2 + ";selection-background-color:" + sel + ";selection-color:" + selText + ";}";
+    q += "QLineEdit#valueEdit{background:" + panel2 + ";border:1px solid " + border2 +
+         ";border-radius:4px;padding:2px 6px;min-height:22px;}";
+    q += "QPushButton#valueApply{padding:3px 8px;min-height:24px;}";
     return q;
 }
 } // namespace
@@ -314,6 +333,7 @@ void MainWindow::applyTheme(const QString& mode) {
     }
     QApplication::setPalette(p);
     qApp->setStyleSheet(makeStyleSheet(dark));
+    if (plot_) plot_->setDarkTheme(dark);
 
     if (themeLight_) themeLight_->setChecked(themeMode_ == "light");
     if (themeDark_) themeDark_->setChecked(themeMode_ == "dark");
@@ -330,10 +350,12 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     QSettings s;
     s.setValue("toolbar/backend", backendBox_->currentData().toString());
     s.setValue("toolbar/device", ui->deviceBox->currentText());
-    s.setValue("toolbar/interval", intervalSpin_->value());
+    s.setValue("toolbar/rate", intervalSpin_->value());
     s.setValue("toolbar/tck", ui->tckBox->currentText());
     s.setValue("appearance/theme", themeMode_);
+    s.setValue("session/initialized", true);
     varDialog_->saveState(s);
+    saveSessionLeaves(s);
     dashboard_->saveState(s);
     QMainWindow::closeEvent(e);
 }
@@ -384,6 +406,8 @@ void MainWindow::buildUi() {
             {"openocd", "OpenOCD"}};
         for (const QString& b : backends)
             backendBox_->addItem(dispNames.value(b, b), b);
+        const int simIdx = backendBox_->findData("sim");
+        if (simIdx >= 0) backendBox_->setCurrentIndex(simIdx);   /* 默认选仿真 */
     }
 
     /* 波形:绘制列表 = 3:1; 波形与仪表盘放在左侧同一个 Tab 里 */
@@ -427,6 +451,29 @@ void MainWindow::buildUi() {
     auto* viewMenu = menuBar()->addMenu("视图(&V)");
     viewMenu->addAction("波形", this, [this] { leftTabs_->setCurrentIndex(0); });
     viewMenu->addAction("仪表盘", this, [this] { leftTabs_->setCurrentIndex(1); });
+
+    /* 顶部参数区统一高度; 宽度按内容分配, 避免大框小字/小框挤字 */
+    const int kCtlH = 30;
+    for (QWidget* w : {static_cast<QWidget*>(backendBox_),
+                       static_cast<QWidget*>(ui->deviceBox),
+                       static_cast<QWidget*>(intervalSpin_),
+                       static_cast<QWidget*>(ui->tckBox)}) {
+        w->setFixedHeight(kCtlH);
+    }
+    backendBox_->setFixedWidth(140);
+    ui->deviceBox->setFixedWidth(92);
+    intervalSpin_->setFixedWidth(108);
+    ui->tckBox->setFixedWidth(80);
+    for (QLabel* lb : {ui->labelBackend, ui->labelTarget,
+                       ui->labelInterval, ui->labelTck}) {
+        lb->setFixedHeight(kCtlH);
+        lb->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    }
+    ui->labelInterval->setText("采样率(Hz):");
+    ui->labelBackend->setText("通讯接口:");
+    ui->labelTarget->setText("目标:");
+    ui->labelTck->setText("TCK(MHz):");
+    ui->mainToolBar->setMovable(false);
 
     auto* themeMenu = menuBar()->addMenu("主题(&T)");
     themeGroup_ = new QActionGroup(this);
@@ -495,7 +542,7 @@ void MainWindow::onConnectClicked() {
     history_.clear();
     t0Ns_ = 0;
     actConn_->setEnabled(false); actDisc_->setEnabled(true);
-    setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/采样间隔/TCK */
+    setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/TCK, 采样率未采样时仍可调 */
     updateStartAction();   /* 连续/单次采样按钮同条件使能 */
     statusConn_->setText("已连接: " + backendBox_->currentText());
     setStatus(QString("已连接 %1").arg(backendBox_->currentText()));
@@ -519,6 +566,25 @@ void MainWindow::onDisconnectClicked() {
 }
 
 /* ---------------- 采样(单按钮: 开始采样 ⇄ 停止采样) ---------------- */
+int MainWindow::rateHz() const {
+    return std::clamp(intervalSpin_->value(), 1, 10000);
+}
+
+/* 采样率 <= 1kHz 走 POLL(1ms 粒度); >1kHz 必须具备 STREAM 能力的后端 */
+bool MainWindow::startSampling(QString* err) {
+    const int hz = rateHz();
+    const int intervalMs = std::max(1, int(std::lround(1000.0 / hz)));
+    engine_->configure(&link_, intervalMs, model_);
+    if (hz > 1000) {
+        if (!link_.hasCap(GS32_CAP_STREAM)) {
+            if (err) *err = QStringLiteral("当前后端不支持 %1Hz；10kHz 需要 STREAM 后端").arg(hz);
+            return false;
+        }
+        return engine_->startStream(uint32_t(std::llround(1e9 / double(hz))), err);
+    }
+    return engine_->start(err);
+}
+
 void MainWindow::onStartClicked() {
     if (stopping_) return;                    /* 停止中: 按钮已禁用, 防重入 */
     if (engine_->running()) {                 /* 采样中 → 执行停止 */
@@ -529,24 +595,27 @@ void MainWindow::onStartClicked() {
         actStart_->setEnabled(false);
         actSingle_->setEnabled(false);
         actStart_->setText("停止中…");
-        /* 采样间隔等连接参数在断开连接前保持禁用(setConnControlsEnabled) */
+        /* 采样率等连接参数在断开连接前保持禁用(setConnControlsEnabled) */
         statusRate_->clear();
         if (!pendingDisconnect_) setStatus("正在停止采样…");
         return;
     }
-    engine_->configure(&link_, intervalSpin_->value(), model_);
     QString err;
-    if (!engine_->start(&err)) { setStatus("启动采样失败: " + err, true); return; }
+    if (!startSampling(&err)) { setStatus("启动采样失败: " + err, true); return; }
     actStart_->setText("停止采样");
     actSingle_->setEnabled(false);
     intervalSpin_->setEnabled(false);
-    setStatus(QString("采样中: %1 叶子 @ %2ms").arg(model_->leafCount()).arg(intervalSpin_->value()));
+    setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
+                  .arg(model_->leafCount())
+                  .arg(rateHz())
+                  .arg(rateHz() > 1000 ? "STREAM" : "POLL"));
 }
 
 /* 单次采样: 读取一拍即自动停止; 期间两按钮禁用, 单次按钮显示等待状态 */
 void MainWindow::onSingleClicked() {
     if (stopping_ || engine_->running()) return;
-    engine_->configure(&link_, intervalSpin_->value(), model_);
+    const int intervalMs = std::max(1, int(std::lround(1000.0 / rateHz())));
+    engine_->configure(&link_, intervalMs, model_);
     QString err;
     if (!engine_->startSingle(&err)) { setStatus("启动采样失败: " + err, true); return; }
     actStart_->setEnabled(false);
@@ -574,19 +643,21 @@ void MainWindow::onEngineStopped() {
         return;
     }
     updateStartAction();
+    intervalSpin_->setEnabled(!connectedBackend_.isEmpty());
     if (pendingRestart_) {
         pendingRestart_ = false;
-        engine_->configure(&link_, intervalSpin_->value(), model_);
         QString err;
-        if (model_->leafCount() && !engine_->start(&err)) {
+        if (model_->leafCount() && !startSampling(&err)) {
             updateStartAction();
             setStatus("重启采样失败: " + err, true);
         } else if (engine_->running()) {
             actStart_->setText("停止采样");
             actSingle_->setEnabled(false);
             intervalSpin_->setEnabled(false);
-            setStatus(QString("采样中: %1 叶子 @ %2ms")
-                          .arg(model_->leafCount()).arg(intervalSpin_->value()));
+            setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
+                          .arg(model_->leafCount())
+                          .arg(rateHz())
+                          .arg(rateHz() > 1000 ? "STREAM" : "POLL"));
         }
         return;
     }
@@ -602,12 +673,13 @@ void MainWindow::updateStartAction() {
     actSingle_->setEnabled(ok);
 }
 
-/* 连接参数区: 连接成功后禁用(防止运行中切换接口/目标/参数), 断开后恢复 */
+/* 连接参数区: 连接成功后锁接口/目标/TCK; 采样率在连接但未采样时仍可调 */
 void MainWindow::setConnControlsEnabled(bool on) {
     backendBox_->setEnabled(on);
     ui->deviceBox->setEnabled(on);
-    intervalSpin_->setEnabled(on);
     ui->tckBox->setEnabled(on);
+    intervalSpin_->setEnabled(on || (!connectedBackend_.isEmpty() &&
+                                     !engine_->running() && !stopping_));
 }
 
 void MainWindow::reconfigureEngine() {
@@ -615,7 +687,7 @@ void MainWindow::reconfigureEngine() {
         /* 采样中模型变更: 先非阻塞停止, stopped() 回调里再重启 */
         pendingRestart_ = true;
         engine_->requestStop();
-        /* 连接期间采样间隔保持禁用, 重启参数沿用当前值 */
+        /* 连接期间采样率保持禁用, 重启参数沿用当前值 */
         actStart_->setEnabled(false);
         actSingle_->setEnabled(false);
         actStart_->setText("停止中…");
@@ -708,6 +780,56 @@ void MainWindow::pruneHistory() {
         if (model_->leafIndexByPath(it.key()) < 0) it = history_.erase(it);
         else ++it;
     }
+}
+
+/* 会话叶子: 除 ELF/SVD 重导入外, 也持久化仿真/绘制专用等扁平变量 */
+void MainWindow::saveSessionLeaves(QSettings& s) const {
+    if (!model_) return;
+    s.beginWriteArray("session/leaves", model_->leafCount());
+    for (int i = 0; i < model_->leafCount(); ++i) {
+        const auto& lf = model_->leaf(i);
+        s.setArrayIndex(i);
+        s.setValue("path", lf.path);
+        s.setValue("addr", lf.def.addr);
+        s.setValue("size", lf.def.size);
+        s.setValue("type", int(lf.def.type));
+        s.setValue("bitOffset", lf.def.bitOffset);
+        s.setValue("bitWidth", lf.def.bitWidth);
+        s.setValue("monitored", lf.monitored);
+        s.setValue("shown", lf.shown);
+    }
+    s.endArray();
+}
+
+void MainWindow::restoreSessionLeaves(QSettings& s) {
+    const int n = s.beginReadArray("session/leaves");
+    for (int i = 0; i < n; ++i) {
+        s.setArrayIndex(i);
+        VariableDef d;
+        d.name = s.value("path").toString();
+        if (d.name.isEmpty()) continue;
+        d.addr = s.value("addr").toUInt();
+        d.size = s.value("size").toUInt();
+        d.type = VariableDef::Type(s.value("type", int(VariableDef::Float)).toInt());
+        d.bitOffset = s.value("bitOffset", -1).toInt();
+        d.bitWidth = s.value("bitWidth").toInt();
+        const bool monitored = s.value("monitored", true).toBool();
+        const bool shown = s.value("shown", false).toBool();
+        int li = model_->leafIndexByPath(d.name);
+        if (li >= 0) {
+            if (model_->leaf(li).monitored != monitored)
+                model_->setLeafMonitored(li, monitored);
+            if (model_->leaf(li).shown != shown)
+                model_->setLeafShown(li, shown);
+        } else if (monitored) {
+            model_->addLeafRoot(d);
+            li = model_->leafIndexByPath(d.name);
+            if (li >= 0 && shown) model_->setLeafShown(li, true);
+        } else if (shown) {
+            model_->addDrawOnlyRoot(d);   /* 默认 shown=true */
+        }
+    }
+    s.endArray();
 }
 
 void MainWindow::syncPlotChannels() {
@@ -899,8 +1021,8 @@ void MainWindow::loadSimDemoVariables() {
     setStatus(QString("仿真演示变量已加载(%1 个新增)").arg(added));
 }
 
-void MainWindow::onSimDemo() {
-    /* 自动化/测试可用 GS32SCOPE_BACKEND 强制后端(sim/sci) */
+bool MainWindow::ensureDemoReady() {
+    /* 自动化/测试可用 GS32SCOPE_BACKEND 强制后端(sim/sci/can) */
     const QString forced = qEnvironmentVariable("GS32SCOPE_BACKEND");
     if (!forced.isEmpty()) {
         const int fi = backendBox_->findData(forced);
@@ -910,21 +1032,34 @@ void MainWindow::onSimDemo() {
         const QString want = backendBox_->currentData().toString();
         if (want != "sim" && want != "sci" && want != "can") {
             const int idx = backendBox_->findData("sim");
-            if (idx < 0) { setStatus("未找到 Simulation/SCI/CAN 驱动", true); return; }
+            if (idx < 0) { setStatus("未找到 Simulation/SCI/CAN 驱动", true); return false; }
             backendBox_->setCurrentIndex(idx);
         }
         onConnectClicked();
-        if (connectedBackend_.isEmpty()) return;
+        if (connectedBackend_.isEmpty()) return false;
     }
     if (connectedBackend_ != "sim" && connectedBackend_ != "sci" &&
         connectedBackend_ != "can") {
         setStatus("仿真演示需要 Simulation/SCI/CAN 后端, 请先断开当前连接", true);
-        return;
+        return false;
     }
 
     loadSimDemoVariables();
-    if (dashboard_->itemCount() == 0) dashboard_->createDemoPanel();
     if (leftTabs_) leftTabs_->setCurrentWidget(dashboard_);
+    if (dashboard_->itemCount() == 0) dashboard_->createDemoPanel();
+    if (leftTabs_) leftTabs_->setCurrentWidget(dashboard_);   /* 创建后再确认一次 */
+    return true;
+}
+
+void MainWindow::onSimDemo() {
+    if (!ensureDemoReady()) return;
+    if (!engine_->running() && !stopping_) onStartClicked();
+}
+
+void MainWindow::onStreamDemo() {
+    if (!ensureDemoReady()) return;
+    if (leftTabs_) leftTabs_->setCurrentWidget(plot_);   /* 10kHz 演示先展示波形 */
+    intervalSpin_->setValue(10000);                      /* 10kHz -> STREAM */
     if (!engine_->running() && !stopping_) onStartClicked();
 }
 

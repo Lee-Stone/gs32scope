@@ -2,7 +2,7 @@
 #define DASHBOARD_WIDGET_H
 /*
  * DashboardWidget - 自定义图形化仪表盘
- * 组件: 数值 / 圆形仪表 / 滑块(写) / 开关(写), 每个组件绑定一个监控变量。
+ * 组件: 数值(显示+写入) / 圆形仪表 / 滑块 / 开关, 每个组件绑定一个监控变量。
  * 布局可拖动, 退出时通过 QSettings 保存, 启动恢复。
  */
 #include <QColor>
@@ -30,6 +30,7 @@ public:
     void saveState(QSettings& s) const;
     void restoreState(QSettings& s);
     void createDemoPanel();
+    void clearAll();
     int  itemCount() const { return items_.size(); }
 
 signals:
@@ -37,6 +38,7 @@ signals:
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
+    void showEvent(QShowEvent* e) override;
 
 private:
     friend class DashboardItem;

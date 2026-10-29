@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
+#include <algorithm>
 
 static QString fmtStat(double v, const VariableDef& d) {
     if (d.type == VariableDef::Double) return QString::number(v, 'f', 6);
@@ -84,10 +85,15 @@ void DisplayList::rebuild() {
     rebuilding_ = true;
     clearContents();
     setRowCount(0);
+    QVector<int> order;
+    for (int li = 0; li < model_->leafCount(); ++li)
+        if (model_->leaf(li).shown) order.append(li);
+    std::sort(order.begin(), order.end(), [this](int a, int b) {
+        return model_->leaf(a).shownSeq < model_->leaf(b).shownSeq;
+    });
     int row = 0;
-    for (int li = 0; li < model_->leafCount(); ++li) {
+    for (int li : order) {
         const auto& lf = model_->leaf(li);
-        if (!lf.shown) continue;
         insertRow(row);
         auto* colorIt = new QTableWidgetItem();
         colorIt->setData(Qt::DecorationRole, model_->root(lf.rootIdx).color);

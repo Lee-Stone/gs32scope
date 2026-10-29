@@ -47,15 +47,120 @@ void SampleEngine::configure(LinkDriver* link, int intervalMs,
     }
     uint32_t total = 0;
     for (const auto& r : regions_) total += r.size;
+    regionBytes_ = total;
     readBuf_.resize(total ? total : 4);
 }
 
 bool SampleEngine::start(QString* err) { return startImpl(false, err); }
 bool SampleEngine::startSingle(QString* err) { return startImpl(true, err); }
 
+bool SampleEngine::startStream(uint32_t periodNs, QString* err) {
+    if (running_.load()) return true;
+    if (worker_.joinable()) worker_.join();
+    if (!link_ || !link_->isLoaded() || leafSpecs_.empty() || regions_.empty()) {
+        if (err) *err = QStringLiteral("引擎未配置或无监控变量");
+        return false;
+    }
+    if (!link_->hasCap(GS32_CAP_STREAM)) {
+        if (err) *err = QStringLiteral("当前后端不支持 STREAM");
+        return false;
+    }
+    gs32_flush_policy_t policy{100, 10000000};   /* 100 点或 10ms 推一块 */
+    if (!link_->configStream(periodNs, regions_.data(), uint32_t(regions_.size()), &policy)) {
+        if (err) *err = QStringLiteral("STREAM 配置失败: ") + link_->lastErrorText();
+        return false;
+    }
+    if (!link_->registerNotify(&SampleEngine::streamNotify, this)) {
+        if (err) *err = QStringLiteral("STREAM 注册回调失败: ") + link_->lastErrorText();
+        return false;
+    }
+    streamT0Ns_ = streamLastNs_ = 0;
+    streamSamples_ = 0;
+    pendingBatch_ = SampleBatch();
+    pendingEmitNs_ = 0;
+    streamMode_.store(true);
+    running_.store(true);
+    if (!link_->startStream()) {
+        streamMode_.store(false);
+        running_.store(false);
+        if (err) *err = QStringLiteral("STREAM 启动失败: ") + link_->lastErrorText();
+        return false;
+    }
+    return true;
+}
+
+void SampleEngine::streamNotify(gs32_handle_t, const gs32_block_hdr_t* hdr,
+                                const uint8_t* payload, void* user) {
+    static_cast<SampleEngine*>(user)->onStreamBlock(hdr, payload);
+}
+
+void SampleEngine::onStreamBlock(const gs32_block_hdr_t* hdr, const uint8_t* payload) {
+    if (!hdr || !payload || !hdr->sample_count || !regionBytes_) return;
+    if (hdr->region_count != regions_.size()) return;
+    const uint32_t n = hdr->sample_count;
+    if (uint64_t(hdr->payload_size) < uint64_t(n) * regionBytes_) return;
+
+    const qint64 period = hdr->period_ns ? qint64(hdr->period_ns) : 1;
+    SampleBatch batch;
+    batch.tNs.resize(int(n));
+    batch.values.resize(leafSpecs_.size());
+    for (uint32_t i = 0; i < n; ++i)
+        batch.tNs[int(i)] = qint64(hdr->t0_ns) + qint64(i) * period;
+    for (auto& v : batch.values) v.resize(int(n));
+
+    for (uint32_t s = 0; s < n; ++s) {
+        const uint8_t* sample = payload + size_t(s) * regionBytes_;
+        for (size_t k = 0; k < leafSpecs_.size(); ++k) {
+            const LeafSpec& spec = leafSpecs_[k];
+            const uint8_t* p = sample + spec.byteOff;
+            double v = gs32::decodeValue(spec.def, p);
+            if (spec.def.bitOffset >= 0)
+                v = gs32::decodeBitfield(spec.def, gs32::readRaw(spec.def, p));
+            batch.values[int(k)][int(s)] = v;
+        }
+    }
+
+    if (streamT0Ns_ == 0) streamT0Ns_ = batch.tNs.first();
+    streamLastNs_ = batch.tNs.last();
+    streamSamples_ += n;
+    if (streamLastNs_ > streamT0Ns_ &&
+        streamLastNs_ - streamT0Ns_ >= 1000000000LL) {
+        EngineStats st;
+        st.actualHz = double(streamSamples_) * 1e9 /
+                      double(streamLastNs_ - streamT0Ns_);
+        st.readMs = 0.0;
+        st.overrun = false;
+        st.wakeLagMs = 0.0;
+        st.writeMs = -1.0;
+        emit statsUpdated(st);
+        streamT0Ns_ = streamLastNs_;
+        streamSamples_ = 0;
+    }
+    if (pendingBatch_.tNs.isEmpty()) {
+        pendingBatch_ = batch;
+    } else {
+        pendingBatch_.tNs += batch.tNs;
+        if (pendingBatch_.values.size() == batch.values.size()) {
+            for (int k = 0; k < batch.values.size(); ++k)
+                pendingBatch_.values[k] += batch.values[k];
+        } else {
+            pendingBatch_ = batch;
+        }
+    }
+    /* 驱动按 10ms 块推送; GUI 以 ~30Hz 消费合并批, 避免 100 batch/s 压垮事件队列 */
+    const qint64 lastT = batch.tNs.last();
+    if (pendingEmitNs_ == 0 || lastT - pendingEmitNs_ >= 33000000LL ||
+        pendingBatch_.tNs.size() >= 2000) {
+        emit batchReady(pendingBatch_);
+        pendingBatch_ = SampleBatch();
+        pendingEmitNs_ = lastT;
+    }
+}
+
 bool SampleEngine::startImpl(bool single, QString* err) {
     if (running_.load()) return true;
     singleShot_ = single;
+    streamMode_.store(false);
     /* 回收上一次已结束的 worker(requestStop 后 runLoop 已退出, join 立即返回),
      * 否则对 joinable 的 std::thread 赋值会触发 terminate */
     if (worker_.joinable()) worker_.join();
@@ -74,10 +179,21 @@ bool SampleEngine::startImpl(bool single, QString* err) {
 }
 
 void SampleEngine::requestStop() {
+    if (streamMode_.exchange(false)) {
+        if (link_) link_->stopStream();
+        running_.store(false);
+        emit stopped();
+        return;
+    }
     running_.store(false);
 }
 
 void SampleEngine::stop() {
+    if (streamMode_.exchange(false)) {
+        if (link_) link_->stopStream();
+        running_.store(false);
+        return;
+    }
     running_.store(false);
     if (worker_.joinable()) worker_.join();
 }

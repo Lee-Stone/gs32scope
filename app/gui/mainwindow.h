@@ -64,6 +64,7 @@ private slots:
     void onWriteLeaf(int leafIdx);
     void onDashboardWrite(const QString& path, double value);
     void onSimDemo();
+    void onStreamDemo();
 
 private:
     void buildUi();
@@ -71,11 +72,16 @@ private:
     bool systemPrefersDark() const;
     void reconfigureEngine();
     void updateStartAction();
-    void setConnControlsEnabled(bool on);  /* 通讯接口/目标/采样间隔/TCK 连接期间禁用 */
+    void setConnControlsEnabled(bool on);  /* 通讯接口/目标/采样率/TCK 连接期间禁用 */
+    bool startSampling(QString* err);      /* 按采样率选择 POLL 或 STREAM */
+    int  rateHz() const;
     void syncPlotChannels();
     void pruneHistory();
+    void saveSessionLeaves(QSettings& s) const;
+    void restoreSessionLeaves(QSettings& s);
     bool writeVariable(const QString& path, double value, bool confirm);
     void loadSimDemoVariables();
+    bool ensureDemoReady();   /* 连接 sim/sci/can、加载演示变量、生成面板 */
     void setStatus(const QString& msg, bool isError = false);
     QLabel* statusMsgLabel();      /* 状态栏左侧消息(懒创建) */
 
@@ -93,7 +99,7 @@ private:
     bool pendingDisconnect_ = false;/* 停止后关闭连接 */
 
     QComboBox*   backendBox_ = nullptr;
-    QSpinBox*    intervalSpin_ = nullptr;
+    QSpinBox*    intervalSpin_ = nullptr;   /* 采样率(Hz) */
     QLabel*      statusConn_ = nullptr;
     QLabel*      statusRate_ = nullptr;
     QLabel*      statusMsg_ = nullptr;   /* 状态栏左侧动态消息 */

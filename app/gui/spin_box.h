@@ -28,7 +28,8 @@ public:
         connect(up_, &QToolButton::clicked, this, &QSpinBox::stepUp);
         connect(down_, &QToolButton::clicked, this, &QSpinBox::stepDown);
         if (auto* le = lineEdit()) {
-            le->setStyleSheet(QStringLiteral("padding-right:30px;"));
+            /* QSpinBox 会把编辑区缩到左侧(原生按钮位); 手动铺满, 数字按整框居中 */
+            le->setStyleSheet(QStringLiteral("padding:0px;background:transparent;border:none;"));
             le->setAlignment(Qt::AlignCenter);
         }
     }
@@ -36,6 +37,8 @@ public:
 protected:
     void resizeEvent(QResizeEvent* e) override {
         QSpinBox::resizeEvent(e);
+        if (auto* le = lineEdit()) le->setGeometry(1, 1, std::max(1, width() - 2),
+                                                   std::max(1, height() - 2));
         const int w = 28;
         const int half = height() / 2;
         up_->setGeometry(width() - w - 1, 1, w, std::max(1, half - 1));

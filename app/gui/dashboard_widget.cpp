@@ -3,6 +3,7 @@
 #include "core/value_codec.h"
 
 #include <QComboBox>
+#include <QCompleter>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -22,6 +23,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QToolButton>
 #include <QToolTip>
@@ -68,6 +70,15 @@ public:
 
         combo_ = new QComboBox(this);
         combo_->setMinimumWidth(300);
+        combo_->setEditable(true);
+        combo_->setInsertPolicy(QComboBox::NoInsert);
+        combo_->setMaxVisibleItems(20);
+        combo_->lineEdit()->setPlaceholderText(QStringLiteral("输入变量名搜索…"));
+        if (QCompleter* comp = combo_->completer()) {
+            comp->setCaseSensitivity(Qt::CaseInsensitive);
+            comp->setFilterMode(Qt::MatchContains);
+            comp->setCompletionMode(QCompleter::PopupCompletion);
+        }
         if (model) {
             for (int i = 0; i < model->leafCount(); ++i)
                 combo_->addItem(model->leaf(i).path, model->leaf(i).path);
@@ -201,12 +212,16 @@ public:
         setAccessibleDescription(label);
         value_ = minV;
         sliderValue_ = value_;
-        if (kind_ == DashboardWidget::Kind::Editor) {
+        if (kind_ == DashboardWidget::Kind::Value ||
+            kind_ == DashboardWidget::Kind::Editor) {
+            /* 数值 = 显示 + 写入合一 */
             edit_ = new QLineEdit(this);
             apply_ = new QPushButton("写入", this);
-            edit_->setPlaceholderText("输入新值");
-            edit_->setGeometry(14, height() - 38, width() - 92, 28);
-            apply_->setGeometry(width() - 70, height() - 38, 56, 28);
+            edit_->setObjectName("valueEdit");
+            apply_->setObjectName("valueApply");
+            edit_->setPlaceholderText("输入新值后回车");
+            edit_->setGeometry(14, height() - 40, width() - 88, 30);
+            apply_->setGeometry(width() - 68, height() - 40, 54, 30);
             connect(apply_, &QPushButton::clicked, this, [this] { applyEdit(); });
             connect(edit_, &QLineEdit::returnPressed, this, [this] { applyEdit(); });
         }
@@ -235,7 +250,7 @@ public:
         if (edit_) {
             edit_->clear();
             edit_->setStyleSheet("");
-            edit_->setPlaceholderText(QStringLiteral("输入新值"));
+            edit_->setPlaceholderText(QStringLiteral("输入新值后回车"));
         }
         setToolTip(path);
         setAccessibleName(path);
@@ -247,8 +262,8 @@ public:
         if (s == size()) return;
         setFixedSize(s);
         if (edit_) {
-            edit_->setGeometry(14, height() - 38, width() - 92, 28);
-            apply_->setGeometry(width() - 70, height() - 38, 56, 28);
+            edit_->setGeometry(14, height() - 40, width() - 88, 30);
+            apply_->setGeometry(width() - 68, height() - 40, 54, 30);
         }
         update();
     }
@@ -267,8 +282,9 @@ public:
         text_ = text;
         valid_ = valid;
         if (kind_ == DashboardWidget::Kind::Slider) sliderValue_ = v;
-        if (kind_ == DashboardWidget::Kind::Editor && edit_ && !edit_->hasFocus())
-            edit_->setPlaceholderText(valid ? text_ : QStringLiteral("输入新值"));
+        if ((kind_ == DashboardWidget::Kind::Value ||
+             kind_ == DashboardWidget::Kind::Editor) && edit_ && !edit_->hasFocus())
+            edit_->setPlaceholderText(valid ? text_ : QStringLiteral("输入新值后回车"));
         if (changed) update();
     }
 
@@ -302,8 +318,7 @@ protected:
         if (kind_ == DashboardWidget::Kind::Gauge) paintGauge(p);
         else if (kind_ == DashboardWidget::Kind::Slider) paintSlider(p);
         else if (kind_ == DashboardWidget::Kind::Toggle) paintToggle(p);
-        else if (kind_ == DashboardWidget::Kind::Editor) paintEditor(p);
-        else paintValue(p);
+        else paintValue(p);   /* 数值组件: 显示 + 输入写入 */
     }
 
     void mousePressEvent(QMouseEvent* e) override {
@@ -380,29 +395,13 @@ private:
 
     void paintValue(QPainter& p) {
         QFont f = font();
-        f.setPointSize(20);
+        f.setPointSize(30);
         f.setBold(true);
         p.setFont(f);
         p.setPen(valid_ ? palette().color(QPalette::Text) : palette().color(QPalette::PlaceholderText));
         const QString t = valid_ ? text_ : QStringLiteral("—");
-        p.drawText(QRectF(14, 26, width() - 28, height() - 38),
-                   Qt::AlignLeft | Qt::AlignVCenter, t);
-    }
-
-    void paintEditor(QPainter& p) {
-        QFont f = font();
-        f.setPointSize(13);
-        f.setBold(true);
-        p.setFont(f);
-        p.setPen(valid_ ? palette().color(QPalette::Text) : palette().color(QPalette::PlaceholderText));
-        p.drawText(QRectF(14, 24, width() - 28, 22), Qt::AlignLeft,
-                   valid_ ? text_ : QStringLiteral("—"));
-        f.setPointSize(7);
-        f.setBold(false);
-        p.setFont(f);
-        p.setPen(palette().color(QPalette::PlaceholderText));
-        p.drawText(QRectF(14, 48, width() - 28, 14), Qt::AlignLeft,
-                   "输入新值后点「写入」");
+        p.drawText(QRectF(14, 28, width() - 28, std::max(24, height() - 78)),
+                   Qt::AlignCenter, t);
     }
 
     void applyEdit() {
@@ -474,14 +473,14 @@ private:
         p.drawEllipse(QPointF(cx, cy), 4, 4);
 
         QFont f = font();
-        f.setPointSize(12);
+        f.setPointSize(19);
         f.setBold(true);
         p.setFont(f);
         p.setPen(valid_ ? palette().color(QPalette::Text) : palette().color(QPalette::PlaceholderText));
-        p.drawText(QRectF(0, cy + radius * 0.55, width(), 24),
+        p.drawText(QRectF(0, cy + radius * 0.55, width(), 28),
                    Qt::AlignCenter, valid_ ? text_ : QStringLiteral("—"));
 
-        f.setPointSize(7);
+        f.setPointSize(8);
         f.setBold(false);
         p.setFont(f);
         p.setPen(palette().color(QPalette::PlaceholderText));
@@ -493,14 +492,14 @@ private:
 
     void paintSlider(QPainter& p) {
         QFont f = font();
-        f.setPointSize(13);
+        f.setPointSize(24);
         f.setBold(true);
         p.setFont(f);
         p.setPen(valid_ ? palette().color(QPalette::Text) : palette().color(QPalette::PlaceholderText));
-        p.drawText(QRectF(14, 24, width() - 28, 22), Qt::AlignLeft,
+        p.drawText(QRectF(14, 22, width() - 28, 38), Qt::AlignLeft | Qt::AlignVCenter,
                    valid_ ? text_ : QStringLiteral("—"));
 
-        f.setPointSize(7);
+        f.setPointSize(8);
         f.setBold(false);
         p.setFont(f);
         p.setPen(palette().color(QPalette::PlaceholderText));
@@ -526,22 +525,22 @@ private:
 
     void paintToggle(QPainter& p) {
         QFont f = font();
-        f.setPointSize(15);
+        f.setPointSize(28);
         f.setBold(true);
         p.setFont(f);
         const bool on = valid_ && value_ != 0;
         p.setPen(on ? accent_ : palette().color(QPalette::PlaceholderText));
-        p.drawText(QRectF(14, 30, width() - 100, height() - 40),
+        p.drawText(QRectF(14, 30, width() - 104, height() - 44),
                    Qt::AlignLeft | Qt::AlignVCenter,
                    valid_ ? (on ? "ON" : "OFF") : QStringLiteral("—"));
 
-        const QRectF pill(width() - 76, height() - 54, 56, 28);
+        const QRectF pill(width() - 82, height() - 62, 64, 32);
         p.setPen(Qt::NoPen);
         p.setBrush(on ? accent_ : palette().color(QPalette::Mid));
-        p.drawRoundedRect(pill, 14, 14);
+        p.drawRoundedRect(pill, 16, 16);
         p.setBrush(Qt::white);
-        const double knobX = on ? pill.right() - 14 : pill.left() + 14;
-        p.drawEllipse(QPointF(knobX, pill.center().y()), 11, 11);
+        const double knobX = on ? pill.right() - 16 : pill.left() + 16;
+        p.drawEllipse(QPointF(knobX, pill.center().y()), 12, 12);
     }
 
     DashboardWidget* owner_ = nullptr;
@@ -581,24 +580,16 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     add->setText("添加组件");
     add->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(add);
-    menu->addAction("数值显示", this, [this] { addItemInteractive(Kind::Value); });
+    menu->addAction("数值", this, [this] { addItemInteractive(Kind::Value); });
     menu->addAction("圆形仪表", this, [this] { addItemInteractive(Kind::Gauge); });
-    menu->addAction("滑块(写入)", this, [this] { addItemInteractive(Kind::Slider); });
-    menu->addAction("开关(写入)", this, [this] { addItemInteractive(Kind::Toggle); });
-    menu->addAction("数值编辑(写入)", this, [this] { addItemInteractive(Kind::Editor); });
+    menu->addAction("滑块", this, [this] { addItemInteractive(Kind::Slider); });
+    menu->addAction("开关", this, [this] { addItemInteractive(Kind::Toggle); });
     add->setMenu(menu);
     auto* demo = new QPushButton("电机演示面板", this);
     auto* clear = new QPushButton("清空", this);
     connect(demo, &QPushButton::clicked, this, &DashboardWidget::createDemoPanel);
-    connect(clear, &QPushButton::clicked, this, [this] {
-        for (auto* it : items_) delete it;
-        items_.clear();
-        clearSnapGuides();
-        canvas_->update();
-        if (scroll_) scroll_->verticalScrollBar()->setValue(0);
-        updateEmptyHint();
-    });
-    auto* hint = new QLabel("拖动标题移动组件，自动吸附到网格；右键绑定/移除；滑块/开关/数值编辑会写入目标", this);
+    connect(clear, &QPushButton::clicked, this, &DashboardWidget::clearAll);
+    auto* hint = new QLabel("拖动组件自动吸附到网格；右键绑定/移除；数值、滑块、开关可直接写入目标", this);
     hint->setStyleSheet(QString());
     {
         QPalette hp = hint->palette();
@@ -621,7 +612,7 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     scroll_->setWidget(canvas_);
     root->addWidget(scroll_, 1);
 
-    emptyHint_ = new QLabel("点击「添加组件」创建数值 / 仪表 / 滑块 / 开关 / 数值编辑\n"
+    emptyHint_ = new QLabel("点击「添加组件」创建数值 / 仪表 / 滑块 / 开关\n"
                             "或点击「电机演示面板」一键生成电机控制面板",
                             canvas_);
     emptyHint_->setAlignment(Qt::AlignCenter);
@@ -638,6 +629,15 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
 DashboardWidget::~DashboardWidget() {
     for (auto* it : items_) delete it;
     items_.clear();
+}
+
+void DashboardWidget::clearAll() {
+    for (auto* it : items_) delete it;
+    items_.clear();
+    clearSnapGuides();
+    if (canvas_) canvas_->update();
+    if (scroll_) scroll_->verticalScrollBar()->setValue(0);
+    updateEmptyHint();
 }
 
 QColor DashboardWidget::accentFor(int index) const {
@@ -781,17 +781,13 @@ void DashboardWidget::refresh() {
 }
 
 void DashboardWidget::createDemoPanel() {
-    for (auto* it : items_) delete it;
-    items_.clear();
-    clearSnapGuides();
-    canvas_->update();
-    if (scroll_) scroll_->verticalScrollBar()->setValue(0);
+    clearAll();
     addItem(Kind::Gauge, "sim.speed", "转速 (rpm)", 0, 120);
     addItem(Kind::Gauge, "sim.current", "电流 (A)", -5, 5);
     addItem(Kind::Slider, "sim.target", "目标转速 (rpm)", 0, 120);
     addItem(Kind::Toggle, "sim.enable", "使能", 0, 1);
-    addItem(Kind::Editor, "sim.temp", "温度 (℃)", 0, 100);
-    addItem(Kind::Editor, "sim.target", "目标转速编辑 (rpm)", 0, 120);
+    addItem(Kind::Value, "sim.temp", "温度 (℃)", 0, 100);
+    layoutItemsToCells();
     updateEmptyHint();
     refresh();
     if (scroll_) scroll_->verticalScrollBar()->setValue(0);
@@ -813,15 +809,13 @@ void DashboardWidget::saveState(QSettings& s) const {
 }
 
 void DashboardWidget::restoreState(QSettings& s) {
-    for (auto* it : items_) delete it;
-    items_.clear();
-    clearSnapGuides();
-    canvas_->update();
+    clearAll();
     const int n = s.beginReadArray("dashboard/items");
     for (int i = 0; i < n; ++i) {
         s.setArrayIndex(i);
-        const int k = s.value("kind", -1).toInt();
+        int k = s.value("kind", -1).toInt();
         if (k < int(Kind::Value) || k > int(Kind::Editor)) continue;
+        if (k == int(Kind::Editor)) k = int(Kind::Value);   /* 旧“数值编辑”合并到“数值” */
         addItem(Kind(k), s.value("path").toString(), s.value("label").toString(),
                 s.value("min", -100).toDouble(), s.value("max", 100).toDouble());
     }
@@ -869,6 +863,20 @@ void DashboardWidget::updateEmptyHint() {
     emptyHint_->setVisible(items_.isEmpty());
     emptyHint_->setGeometry(canvas_->rect());
     emptyHint_->lower();
+}
+
+void DashboardWidget::showEvent(QShowEvent* e) {
+    QWidget::showEvent(e);
+    if (!canvas_) return;
+    /* 仅在列数/格子宽度变化时重排; 用户拖拽后的位置在切页时保持 */
+    const int cols = colCount();
+    const int tw = tileWidth();
+    if (!items_.isEmpty() && (cols != lastCols_ || tw != tileW_)) {
+        lastCols_ = cols;
+        tileW_ = tw;
+        layoutItemsToCells();
+    }
+    updateEmptyHint();
 }
 
 void DashboardWidget::resizeEvent(QResizeEvent* e) {

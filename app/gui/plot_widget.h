@@ -2,9 +2,9 @@
 #define PLOT_WIDGET_H
 /*
  * PlotWidget - 单波形窗口
- * 统一主坐标系(所有通道共享 X/Y), 暗色示波器风格。
- * 时间轴使用会话相对时间(秒): 默认跟随最新样本, X 显示 [now-5, now+5];
- * 滚轮/拖动后进入手动视图, 双击恢复跟随与默认 Y 量程。
+ * 统一主坐标系(所有通道共享 X/Y), 跟随浅色/深色主题。
+ * 时间轴使用会话相对时间(秒): 默认跟随最新样本并平滑滚动; 滚轮/拖动后进入手动视图,
+ * 双击恢复跟随与默认 Y 量程。
  */
 #include <QWidget>
 #include <QHash>
@@ -28,6 +28,7 @@ public:
     void trimBefore(double tSec);
     void clearData();
     void replot();
+    void setDarkTheme(bool dark);   /* 波形页跟随应用主题 */
     bool hasChannel(const QString& name) const;
     bool hasData() const { return lastT_ != 0.0 || dataPoints_ > 0; }
     double lastTime() const { return lastT_; }
@@ -47,17 +48,21 @@ private:
     };
     Channel* chan(const QString& name);
 
-    void applyDarkStyle();
+    void applyStyle();
+    void updateYRange();           /* 自动跟随模式下按可见数据缩放 Y */
     bool eventFilter(QObject* obj, QEvent* ev) override;
 
     QCustomPlot* plot_ = nullptr;
     QHash<QString, Channel> channels_;
     double windowSec_ = 5.0;     /* 跟随模式下 X 半窗宽(总宽 10s) */
-    double historySec_ = 60.0;   /* 数据保留时长 */
+    double historySec_ = 60.0;   /* 数据保留时长(高采样率下按点数上限再截断) */
     double lastT_ = 0.0;
+    double displayT_ = 0.0;      /* 平滑滚动显示位置 */
+    bool   displayInit_ = false;
     qint64 dataPoints_ = 0;
     bool   userZoomed_ = false;  /* X 被手动缩放/拖动 */
     bool   manualY_ = false;     /* Y 量程被手动设定 */
+    bool   dark_ = true;         /* 当前波形配色 */
 };
 
 #endif /* PLOT_WIDGET_H */

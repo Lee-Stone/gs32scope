@@ -10,7 +10,12 @@ const QColor kColors[] = {
 }
 
 MonitorModel::MonitorModel(QObject* parent) : QObject(parent) {}
-MonitorModel::~MonitorModel() { clear(); }
+MonitorModel::~MonitorModel() {
+    /* 析构期间不能发 changed(): 监控树/绘制列表可能正在被销毁,
+     * rebuild() 访问半析构对象会在关闭时崩溃. */
+    blockSignals(true);
+    clear();
+}
 
 QColor MonitorModel::nextColor() {
     const QColor c = kColors[colorIdx_ % 6];
@@ -99,6 +104,7 @@ int MonitorModel::addDrawOnlyRoot(const VariableDef& v) {
     const int li = addFlatLeaf(v.name, v, roots_.size() - 1);
     leaves_[li].monitored = false;
     leaves_[li].shown = true;   /* 绘制专用: 默认进绘制列表 */
+    leaves_[li].shownSeq = ++shownSeq_;
     r->tree->leafIdx = li;
     emit changed();
     return li;
@@ -147,7 +153,7 @@ void MonitorModel::removeRoot(int rootIdx) {
 void MonitorModel::clear() {
     for (MonitorRoot* r : roots_) delete r;
     roots_.clear();
-    leaves_.clear(); leafIdx_.clear(); colorIdx_ = 0;
+    leaves_.clear(); leafIdx_.clear(); colorIdx_ = 0; shownSeq_ = 0;
     emit changed();
 }
 
@@ -178,6 +184,7 @@ void MonitorModel::setLeafShown(int leafIdx, bool on) {
     if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
     if (leaves_[leafIdx].shown == on) return;
     leaves_[leafIdx].shown = on;
+    leaves_[leafIdx].shownSeq = on ? ++shownSeq_ : 0;
     emit leafShownChanged(leafIdx);
 }
 
@@ -187,6 +194,7 @@ void MonitorModel::setLeavesShown(const QVector<int>& leafIdxs, bool on) {
         if (li < 0 || li >= leaves_.size()) continue;
         if (leaves_[li].shown != on) {
             leaves_[li].shown = on;
+            leaves_[li].shownSeq = on ? ++shownSeq_ : 0;
             any = true;
         }
     }

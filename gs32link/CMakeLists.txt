@@ -6,7 +6,7 @@ add_library(gs32link_sim SHARED
     drivers/sim/sim_driver.cpp
 )
 target_include_directories(gs32link_sim PRIVATE ${GS32LINK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/common)
-target_compile_definitions(gs32link_sim PRIVATE GS32LINK_BUILDING)
+target_compile_definitions(gs32link_sim PRIVATE GS32LINK_BUILDING NOMINMAX WIN32_LEAN_AND_MEAN)
 set_target_properties(gs32link_sim PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${GS32_DRIVERS_DIR}
     PREFIX "")

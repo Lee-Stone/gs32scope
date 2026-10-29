@@ -30,6 +30,7 @@ struct MonitorLeaf {
     qint64      n = 0;
     bool        shown = false;     /* 绘制列表/波形 */
     bool        monitored = true;  /* 监控列表(右侧); 绘制专用叶子为 false */
+    quint64     shownSeq = 0;      /* 加入绘制顺序: 新加入的排在底部表格最后 */
 };
 
 struct MonitorRoot {
@@ -87,6 +88,7 @@ private:
     QVector<MonitorLeaf> leaves_;
     QHash<QString, int>  leafIdx_;
     int colorIdx_ = 0;
+    quint64 shownSeq_ = 0;
 };
 
 #endif /* MONITOR_MODEL_H */

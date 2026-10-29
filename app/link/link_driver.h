@@ -38,6 +38,22 @@ public:
         return names;
     }
 
+    /* 扫描后端端口(可选符号, gslink 实现); 返回端口描述列表 */
+    static QStringList scanPorts(const QString& backend) {
+        QStringList ports;
+        QLibrary lib(driversDir() + "/gs32link_" + backend + ".dll");
+        if (!lib.load()) return ports;
+        auto fn = reinterpret_cast<int (*)(char*, uint32_t)>(lib.resolve("gs32_list_ports"));
+        if (!fn) return ports;
+        const int need = fn(nullptr, 0);
+        if (need <= 1) return ports;
+        QByteArray buf(need, 0);
+        fn(buf.data(), (uint32_t)buf.size());
+        for (const QByteArray& p : buf.split('|'))
+            if (!p.isEmpty()) ports << QString::fromUtf8(p);
+        return ports;
+    }
+
     static QString driversDir() {
         return QCoreApplication::applicationDirPath() + "/drivers";
     }
@@ -89,6 +105,21 @@ public:
         uint32_t c = 0;
         return caps(&c) && (c & bit) != 0;
     }
+    /* 驱动日志回调(可选符号): 转发 DLL 内部日志到宿主(如 GUI 日志面板) */
+    static std::function<void(const QString&)>& logHandler() {
+        static std::function<void(const QString&)> h;
+        return h;
+    }
+    static void logTrampoline(const char* line, void*) {
+        const auto& h = logHandler();
+        if (h && line) h(QString::fromUtf8(line));
+    }
+    bool setLogHandler(std::function<void(const QString&)> h) {
+        logHandler() = std::move(h);
+        if (fn_set_log_sink_) fn_set_log_sink_(&logTrampoline, nullptr);
+        return fn_set_log_sink_ != nullptr;
+    }
+
     QString lastErrorText() const { return lastError_; }
 
     /* ---- STREAM 透传 ---- */
@@ -139,6 +170,7 @@ private:
         if (!sym("gs32_write", fn_write_)) goto fail;
         if (!sym("gs32_last_error", fn_last_error_)) goto fail;
         sym("gs32_last_write_ms", fn_last_write_ms_);   /* 可选: 旧驱动缺失不报错 */
+        sym("gs32_set_log_sink", fn_set_log_sink_);      /* 可选: 驱动日志回调 */
         if (!sym("gs32_get_caps", fn_get_caps_)) goto fail;
         if (!sym("gs32_get_version", fn_get_version_)) goto fail;
         if (!sym("gs32_config_stream", fn_config_stream_)) goto fail;
@@ -170,6 +202,7 @@ private:
                      const uint8_t*, uint32_t, uint32_t) = nullptr;
     const char* (*fn_last_error_)(gs32_handle_t) = nullptr;
     int (*fn_last_write_ms_)(gs32_handle_t, double*) = nullptr;   /* 可选符号 */
+    void (*fn_set_log_sink_)(void (*)(const char*, void*), void*) = nullptr;  /* 可选符号 */
     int (*fn_get_caps_)(gs32_handle_t, uint32_t*) = nullptr;
     int (*fn_get_version_)(char*, uint32_t) = nullptr;
     int (*fn_config_stream_)(gs32_handle_t, uint32_t, const gs32_mem_region_t*,

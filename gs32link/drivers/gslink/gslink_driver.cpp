@@ -36,6 +36,25 @@ extern "C" {
 
 GS32LINK_EXPORT const char* gs32_driver_name(void) { return "gslink"; }
 
+/* 宿主注册日志回调: 驱动日志(GUI 日志面板)替代控制台弹窗 */
+GS32LINK_EXPORT void gs32_set_log_sink(void (*fn)(const char*, void*), void* user) {
+    gs32::setLogSink(fn, user);
+}
+
+/* 枚举 FTDI 端口描述, '|' 分隔写入 buf; buf=NULL 返回所需字节数 */
+GS32LINK_EXPORT int gs32_list_ports(char* buf, uint32_t buflen) {
+    gs32::FtdiJtag j;
+    std::vector<std::string> ports;
+    if (!j.listPorts(ports) || ports.empty()) return 0;
+    std::string all;
+    for (const auto& p : ports) all += p + "|";
+    if (!buf) return (int)all.size() + 1;
+    const uint32_t n = buflen < (uint32_t)all.size() + 1 ? buflen
+                                                        : (uint32_t)all.size() + 1;
+    memcpy(buf, all.c_str(), n);
+    return (int)ports.size();
+}
+
 GS32LINK_EXPORT int gs32_get_version(char* buf, uint32_t buflen) {
     static const char* v = "gs32link gslink 0.5.0 (D2XX, layered+batch)";
     if (!buf) return (int)strlen(v) + 1;
@@ -59,7 +78,19 @@ GS32LINK_EXPORT int gs32_open(const gs32_config_t* cfg, gs32_handle_t* out) {
         cfg->speed_khz);
     auto* s = new GsLinkState();
     std::string err;
-    if (!s->jtag.open(cfg->speed_khz ? cfg->speed_khz : 4000, err)) {
+    /* extra JSON {"port":"desc"}: 指定打开的 FTDI 端口(无 JSON 库, 手工提取) */
+    const char* port = nullptr;
+    std::string portStr;
+    if (cfg->extra) {
+        const char* k = strstr(cfg->extra, "\"port\"");
+        const char* q1 = k ? strchr(k + 6, '"') : nullptr;
+        const char* q2 = q1 ? strchr(q1 + 1, '"') : nullptr;
+        if (q1 && q2 && q2 > q1 + 1) {
+            portStr.assign(q1 + 1, q2);
+            port = portStr.c_str();
+        }
+    }
+    if (!s->jtag.open(cfg->speed_khz ? cfg->speed_khz : 4000, port, err)) {
         g_global_error = err;
         gs32::logInfo("[open] %s\n", err.c_str());
         delete s;

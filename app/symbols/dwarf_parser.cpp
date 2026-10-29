@@ -814,6 +814,8 @@ bool DwarfParser::parse(const QByteArray& elf, QVector<DwarfVar>& out, QString* 
             if (!ok) continue;
         }
         /* name/type: 支持 specification/abstract_origin 间接 */
+        /* DW_OP_addr=0: 链接器未实际分配(被合并/消除的符号), 读取会触发总线错误 */
+        if (addr == 0) continue;
         Die* src = die;
         QString name;
         Val* ty = nullptr;

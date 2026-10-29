@@ -121,6 +121,7 @@ MainWindow::MainWindow() {
         if (initialized) {
             varDialog_->restoreState(s);
             restoreSessionLeaves(s);
+
             dashboard_->restoreState(s);
             const QByteArray dockState = s.value("window/dockState").toByteArray();
             if (!dockState.isEmpty()) restoredDockState = restoreState(dockState);
@@ -377,6 +378,22 @@ MainWindow::~MainWindow() {
 }
 
 /* setupUi 之后的代码侧收尾: 控件指针绑定/动态内容/代码专属属性 */
+/* 目标下拉: 重扫 FTDI 端口列表; 当前选择仍在列表中则保留, 否则默认第一个 */
+void MainWindow::refreshPortList() {
+    const QString cur = ui->deviceBox->currentText();
+    const QStringList ports = LinkDriver::scanPorts(QStringLiteral("gslink"));
+    ui->deviceBox->blockSignals(true);
+    ui->deviceBox->clear();
+    if (ports.isEmpty()) {
+        ui->deviceBox->addItem(QStringLiteral("(未发现端口)"));
+    } else {
+        ui->deviceBox->addItems(ports);
+        const int idx = ports.indexOf(cur);
+        ui->deviceBox->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    ui->deviceBox->blockSignals(false);
+}
+
 void MainWindow::buildUi() {
     backendBox_ = ui->backendBox;
     intervalSpin_ = ui->intervalSpin;
@@ -401,16 +418,23 @@ void MainWindow::buildUi() {
         backendBox_->addItem("(未找到驱动)");
     } else {
         static const QHash<QString, QString> dispNames{
-            {"gslink", "GS32-Link"}, {"jlink", "JLink"},
-            {"sim", "Simulation"}, {"sci", "SCI"}, {"can", "CAN-GW"},
-            {"openocd", "OpenOCD"}};
-        for (const QString& b : backends)
-            backendBox_->addItem(dispNames.value(b, b), b);
+            {"gslink", "OpenOCD"},
+            {"sim", "Simulation"}};
+
+        for (const QString& b : backends) {
+            if (!dispNames.contains(b)) continue;
+            backendBox_->addItem(dispNames.value(b), b);
+        }
         const int simIdx = backendBox_->findData("sim");
         if (simIdx >= 0) backendBox_->setCurrentIndex(simIdx);   /* 默认选仿真 */
     }
 
     /* 四块停靠面板: 波形+仪表盘(上排等宽) / 监控+日志(下排等宽) */
+    /* 目标下拉=扫描到的端口: 启动刷新+默认第一个; 每次展开下拉时重新刷新 */
+    refreshPortList();
+    connect(ui->deviceBox, &ComboBox::popupAboutToShow,
+            this, &MainWindow::refreshPortList);
+
     plot_ = new PlotWidget(this);
     dashboard_ = new DashboardWidget(this);
     dashboard_->setMonitorModel(model_);
@@ -613,6 +637,13 @@ void MainWindow::onConnectClicked() {
     const QString backend = backendBox_->currentData().toString();
     if (backend.isEmpty()) return;
     if (!link_.load(backend)) { setStatus("加载驱动失败: " + link_.lastError(), true); return; }
+    /* 驱动日志转发到日志面板(驱动线程 → UI 线程 queued), 替代弹控制台 */
+    link_.setLogHandler([this](const QString& s) {
+        const QString line = s.trimmed();
+        if (line.isEmpty()) return;
+        QMetaObject::invokeMethod(this, [this, line]() { appendLog(line); },
+                                  Qt::QueuedConnection);
+    });
     gs32_config_t cfg{};
     const QByteArray bBackend = backend.toUtf8();
     QByteArray bExtra;
@@ -636,7 +667,9 @@ void MainWindow::onConnectClicked() {
     }
     /* 目标下拉框: RV32 → riscv32(驱动内部识别名) */
     const QString devText = ui->deviceBox->currentText();
-    const QByteArray bDevice = (devText == "RV32" ? QString("riscv32") : devText).toUtf8();
+    const QByteArray bDevice = QByteArrayLiteral("riscv32");
+    if (backend == "gslink" && !devText.isEmpty() && !devText.startsWith("("))
+        bExtra = QString("{\"port\":\"%1\"}").arg(devText).toUtf8();
     const QByteArray bIf = backend == "gslink" ? QByteArray("jtag")
                          : (backend == "sci" ? QByteArray("serial")
                          : (backend == "can" ? QByteArray("can") : QByteArray("swd")));

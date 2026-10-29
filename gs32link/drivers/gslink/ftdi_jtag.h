@@ -26,6 +26,8 @@ typedef unsigned long FT_STATUS;
 struct D2xxApi {
     HMODULE mod = nullptr;
     FT_STATUS (WINAPI *Open)(int, FT_HANDLE*) = nullptr;
+    FT_STATUS (WINAPI *OpenEx)(void*, unsigned long, FT_HANDLE*) = nullptr;
+    FT_STATUS (WINAPI *ListDevices)(void*, void*, unsigned long) = nullptr;
     FT_STATUS (WINAPI *Close)(FT_HANDLE) = nullptr;
     FT_STATUS (WINAPI *Write)(FT_HANDLE, void*, unsigned long, unsigned long*) = nullptr;
     FT_STATUS (WINAPI *Read)(FT_HANDLE, void*, unsigned long, unsigned long*) = nullptr;
@@ -39,8 +41,10 @@ struct D2xxApi {
 
 class FtdiJtag {
 public:
-    /* 打开通道0并完成 MPSSE 初始化(时钟分频/引脚方向) */
-    bool open(uint32_t speed_khz, std::string& err);
+    /* 打开指定描述的端口(port 为空/未找到时回退设备0)并完成 MPSSE 初始化 */
+    bool open(uint32_t speed_khz, const char* port, std::string& err);
+    /* 枚举 FTDI 设备描述(端口下拉用); false = D2XX 不可用 */
+    bool listPorts(std::vector<std::string>& out);
     void close();
     bool isOpen() const { return ft_ != nullptr; }
 

@@ -395,10 +395,26 @@ int RiscvDebug::ensureReady() {
     uint32_t st = 0;
     if (!dmiReadReg(DM_DMSTATUS, &st)) {
         logInfo("[init] dmstatus=0x%08X (ver=%d auth=%d halted=%d havereset=%d)\n",
-                st, (int)(st & 0xF), (int)((st >> 10) & 1),
-                (int)((st >> 11) & 1), (int)((st >> 22) & 1));
+                st, (int)(st & 0xF), (int)((st >> 7) & 1),
+                (int)((st >> 9) & 1), (int)((st >> 22) & 1));
     }
     /* 配置 SBA: sbreadonaddr=1 + 32bit 访问(整个连接生命周期只需一次) */
+    /* 在线示波器要求目标运行: hart 处于暂停(残留调试态/异常 ebreak)时自动恢复,
+     * 否则计数类变量全部冻结为常数, 采样无意义 */
+    if (st & (1u << 9)) {   /* allhalted(bit9); bit10/11 是 resumeack, 不是 halted */
+        /* 目标暂停时尝试一次标准恢复; 恢复不了(固件崩溃/复位挂起)不强求,
+         * 采样仍可进行(值冻结), 日志提示用户重启板子 */
+        logInfo("[init] hart halted, resuming...\n");
+        dmiWriteReg(DM_DMCONTROL, DMCONTROL_DMACTIVE | (1u << 30));   /* resumereq */
+        uint32_t s2 = 0;
+        for (int i = 0; i < 32; ++i) {
+            if (dmiReadReg(DM_DMSTATUS, &s2)) { s2 = 0xDEADDEAD; break; }
+            if (!(s2 & (1u << 9))) break;
+        }
+        logInfo("[init] resume result dmstatus=0x%08X%s\n", s2,
+                (s2 & (1u << 9)) ? " (STILL HALTED - values may be frozen, power-cycle the board)"
+                                 : " (running)");
+    }
     if (sbaConfigure()) {
         logInfo("[init] SBA configure FAILED\n");
         return GS32_ERR_CONNECT;
@@ -464,7 +480,7 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
      * 末次触发的是段末+1 的"越界"读 — 若该地址无效会置粘滞 sberror 并阻断后续
      * SBA 访问(且不反映在 DMI resp 里), 必须每批检查 sberror 以便清除+回退 */
     size_t sbcsCheckScan = SIZE_MAX;                   /* 末位 NOP 的 tdo 槽位 */
-    if (autoInc_) { nScans += 2; sbcsCheckScan = nScans - 1; }
+    nScans += 2; sbcsCheckScan = nScans - 1;   /* 坏地址在普通模式也置粘滞 sberror, 检查无条件启用 */
 
     std::vector<uint8_t> tdoFlat(6 * nScans);          /* 每扫描 6B tdo 落点 */
     struct Rec { uint8_t* tdo; uint8_t* dst; uint8_t nBytes; };
@@ -530,7 +546,7 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
         p += size;
     }
     /* 批末 sberror 检查扫描(突发模式): R SBCS + NOP(其 tdo 即 sbcs 值) */
-    if (ok && autoInc_) {
+    if (ok) {
         if (!emit(dr41(DMI_OP_READ, DM_SBCS, 0), nullptr, 0)) ok = false;
         if (ok && !emit(dr41(DMI_OP_NOP, 0, 0), nullptr, 0)) ok = false;
     }
@@ -545,11 +561,27 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
     for (const auto& rec : recs) {
         const unsigned resp = rec.tdo[0] & 3;
         if (resp) {
-            logInfo("[sba-multi] DMI resp=%u, fallback slow path\n", resp);
+            logInfo("[sba-multi] DMI resp=%u, disable burst + fallback slow path\n", resp);
+            autoInc_ = false;
+            sbWaitIdle();   /* 先等飞行中的坏地址访问落地, 否则清错后错误又置上 */
+            curSbAccess_ = -1;
+            dmiWriteReg(DM_SBCS, SBCS_SBERROR_W1C | (1u << 22));
             uint8_t* q = out;
             for (uint32_t r = 0; r < count; ++r) {
                 if (!regs[r].size) continue;
                 if (readMem(regs[r].addr, q, regs[r].size)) return GS32_ERR_READ;
+                {   /* 坏地址 region 读后置粘滞 sberror, 不清会阻断后续 region/下一批 */
+                    uint32_t cs = 0;
+                    if (!dmiReadReg(DM_SBCS, &cs) &&
+                        (((cs >> SBCS_SBERROR_SHIFT) & 7) || (cs & (1u << 22))))
+                    /* 先等飞行中的坏地址访问落地(sbbusy), 再清粘滞错; 顺序反了错误会清后又置 */
+                    sbWaitIdle();
+                    dmiWriteReg(DM_SBCS, SBCS_SBERROR_W1C | (1u << 22));
+                    /* 纯 W1C 清错写会顺带清掉配置位(readonaddr 等), 必须重写恢复,
+                     * 否则宽度缓存误判"无需重写", 后续 W addr 不再触发读 */
+                    dmiWriteReg(DM_SBCS, sbcsCfg_(2));
+                    curSbAccess_ = 2;
+                }
                 q += regs[r].size;
             }
             return GS32_OK;
@@ -573,11 +605,27 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
         if (sberr || (cs & (1u << 22))) {
             logInfo("[sba-multi] sberror=%d sbbusyerror=%d after burst, "
                     "clear + fallback slow path\n", sberr, (int)((cs >> 22) & 1));
+            /* 检出即关突发: 慢路径仍带 autoincrement+readondata 会反复投机越界读 */
+            autoInc_ = false;
+            sbWaitIdle();   /* 先等飞行中的坏地址访问落地, 否则清错后错误又置上 */
+            curSbAccess_ = -1;
             dmiWriteReg(DM_SBCS, SBCS_SBERROR_W1C | (1u << 22));
             uint8_t* q = out;
             for (uint32_t r = 0; r < count; ++r) {
                 if (!regs[r].size) continue;
                 if (readMem(regs[r].addr, q, regs[r].size)) return GS32_ERR_READ;
+                {   /* 坏地址 region 读后置粘滞 sberror, 不清会阻断后续 region/下一批 */
+                    uint32_t cs = 0;
+                    if (!dmiReadReg(DM_SBCS, &cs) &&
+                        (((cs >> SBCS_SBERROR_SHIFT) & 7) || (cs & (1u << 22))))
+                    /* 先等飞行中的坏地址访问落地(sbbusy), 再清粘滞错; 顺序反了错误会清后又置 */
+                    sbWaitIdle();
+                    dmiWriteReg(DM_SBCS, SBCS_SBERROR_W1C | (1u << 22));
+                    /* 纯 W1C 清错写会顺带清掉配置位(readonaddr 等), 必须重写恢复,
+                     * 否则宽度缓存误判"无需重写", 后续 W addr 不再触发读 */
+                    dmiWriteReg(DM_SBCS, sbcsCfg_(2));
+                    curSbAccess_ = 2;
+                }
                 q += regs[r].size;
             }
         }

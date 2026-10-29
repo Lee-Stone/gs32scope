@@ -1,6 +1,7 @@
 #ifndef COMBO_BOX_H
 #define COMBO_BOX_H
 /* 下拉框: 始终向下展开选项(不因空间自动翻到上方) */
+#include <QAbstractItemView>
 #include <QComboBox>
 #include <QGuiApplication>
 #include <QScreen>
@@ -9,10 +10,16 @@
 
 class ComboBox : public QComboBox
 {
+    Q_OBJECT
 public:
     using QComboBox::QComboBox;
 
+signals:
+    void popupAboutToShow();   /* 展开前发出, 用于下拉时刷新列表 */
+
+public:
     void showPopup() override {
+        emit popupAboutToShow();
         QComboBox::showPopup();
         QWidget* popup = view() ? view()->window() : nullptr;
         if (!popup) return;

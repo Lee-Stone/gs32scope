@@ -63,6 +63,8 @@ bool D2xxApi::load(std::string& err) {
     struct Entry { const char* name; void** pfn; };
     const Entry table[] = {
         {"FT_Open",        (void**)&Open},
+        {"FT_OpenEx",      (void**)&OpenEx},
+        {"FT_ListDevices", (void**)&ListDevices},
         {"FT_Close",       (void**)&Close},
         {"FT_Write",       (void**)&Write},
         {"FT_Read",        (void**)&Read},
@@ -83,15 +85,44 @@ bool D2xxApi::load(std::string& err) {
     return true;
 }
 
-/* ---- 打开/关闭 ---- */
-bool FtdiJtag::open(uint32_t speed_khz, std::string& err) {
+bool FtdiJtag::listPorts(std::vector<std::string>& out) {
+    std::string err;
     if (!api_.load(err)) return false;
-    if (api_.Open(0, &ft_) != FT_OK) {
+    unsigned long n = 0;
+    /* FT_LIST_NUMBER_ONLY: 仅查询设备数 */
+    if (!api_.ListDevices ||
+        api_.ListDevices(&n, nullptr, 0x80000000u) != 0 || n == 0)
+        return true;   /* 无设备 */
+    if (n > 64) n = 64;
+    /* FT_LIST_ALL|FT_OPEN_BY_DESCRIPTION: pArg1=char*[] (每项 64B), pArg2=&数量 */
+    std::vector<char> buf(n * 64, 0);
+    std::vector<char*> ptrs(n, nullptr);
+    for (unsigned long i = 0; i < n; ++i) ptrs[i] = &buf[i * 64];
+    unsigned long cnt = n;
+    if (api_.ListDevices(ptrs.data(), &cnt, 0x20000002u) != 0) return false;
+    for (unsigned long i = 0; i < cnt && i < n; ++i)
+        out.push_back(std::string(ptrs[i]));
+    return true;
+}
+
+/* ---- 打开/关闭 ---- */
+bool FtdiJtag::open(uint32_t speed_khz, const char* port, std::string& err) {
+    if (!api_.load(err)) return false;
+    bool ok = false;
+    if (port && *port) {
+        /* 按描述打开指定端口(FT_OPEN_BY_DESCRIPTION=2); 失败回退设备0 */
+        if (api_.OpenEx && api_.OpenEx((void*)port, 2, &ft_) == 0) {
+            ok = true;
+        } else {
+            logInfo("[open] FT_OpenEx(%s) failed, fallback to device 0\n", port);
+        }
+    }
+    if (!ok && api_.Open(0, &ft_) != 0) {
         err = "FT_Open failed: check FT2232H connected & FTDI driver installed";
         logInfo("[open] FT_Open FAILED\n");
         return false;
     }
-    logInfo("[open] FT_Open OK\n");
+    logInfo("[open] FT_Open OK (port=%s)\n", (port && *port) ? port : "0");
     if (api_.ResetDevice(ft_) != FT_OK ||
         api_.Purge(ft_, FT_PURGE_RX | FT_PURGE_TX) != FT_OK ||
         api_.SetTimeouts(ft_, 2000, 2000) != FT_OK ||

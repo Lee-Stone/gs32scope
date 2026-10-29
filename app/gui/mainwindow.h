@@ -65,6 +65,7 @@ private slots:
 
 private:
     void buildUi();
+    void refreshPortList();   /* 目标下拉: 重扫端口, 保留当前选择, 默认第一个 */
     void applyTheme(const QString& mode);   /* light / dark / system */
     bool systemPrefersDark() const;
     void reconfigureEngine();

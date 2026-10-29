@@ -1,7 +1,7 @@
 # GS32Scope 上位机 (qmake, Qt 6.8.3)
 # 用法: 在本目录执行 qmake GS32Scope.pro && mingw32-make release
 
-QT += core gui widgets printsupport
+QT += core gui widgets printsupport svg
 CONFIG += c++17
 TEMPLATE = app
 TARGET = GS32Scope

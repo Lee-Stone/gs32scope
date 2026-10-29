@@ -168,6 +168,17 @@ void PlotWidget::clearData() {
     replot();
 }
 
+namespace {
+/* 量程极小时固定精度会让所有刻度四舍五入成同一个数字; 随量程加密小数位 */
+void setAxisPrecision(QCPAxis* ax, double range) {
+    if (!ax) return;
+    const double r = std::max(range, 1e-12);
+    const int digits = std::clamp(int(std::ceil(-std::log10(r))) + 2, 0, 9);
+    ax->setNumberFormat(QStringLiteral("f"));
+    ax->setNumberPrecision(digits);
+}
+} // namespace
+
 void PlotWidget::updateYRange() {
     double lo = std::numeric_limits<double>::infinity();
     double hi = -std::numeric_limits<double>::infinity();
@@ -181,8 +192,7 @@ void PlotWidget::updateYRange() {
     }
     if (!std::isfinite(lo) || !std::isfinite(hi) || hi < lo) {
         plot_->yAxis->setRange(-100.0, 100.0);
-        plot_->yAxis->setNumberFormat("f");
-        plot_->yAxis->setNumberPrecision(0);
+        setAxisPrecision(plot_->yAxis, 200.0);
         return;
     }
 
@@ -195,11 +205,7 @@ void PlotWidget::updateYRange() {
     plot_->yAxis->setRange(lower, upper);
 
     /* 刻度精度随量程变化: 2 的量程 -> 0.01 级显示 */
-    const double range = std::max(upper - lower, 1e-12);
-    const int digits = std::clamp(
-        int(std::ceil(-std::log10(range))) + 2, 0, 6);
-    plot_->yAxis->setNumberFormat("f");
-    plot_->yAxis->setNumberPrecision(digits);
+    setAxisPrecision(plot_->yAxis, upper - lower);
 }
 
 void PlotWidget::replot() {
@@ -215,6 +221,8 @@ void PlotWidget::replot() {
         plot_->xAxis->setRange(displayT_ - windowSec_, displayT_ + windowSec_);
     }
     if (!manualY_) updateYRange();
+    else setAxisPrecision(plot_->yAxis, plot_->yAxis->range().size());
+    setAxisPrecision(plot_->xAxis, plot_->xAxis->range().size());
     plot_->replot(QCustomPlot::rpQueuedReplot);
 }
 

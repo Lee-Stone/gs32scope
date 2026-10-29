@@ -14,29 +14,12 @@
    <string>GS32Scope</string>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QVBoxLayout" name="centralLayout">
-    <property name="leftMargin">
-     <number>0</number>
-    </property>
-    <property name="topMargin">
-     <number>0</number>
-    </property>
-    <property name="rightMargin">
-     <number>0</number>
-    </property>
-    <property name="bottomMargin">
-     <number>0</number>
-    </property>
-    <item>
-     <widget class="QSplitter" name="mainSplitter">
-      <property name="orientation">
-       <enum>Qt::Vertical</enum>
-      </property>
-      <widget class="PlotWidget" name="plot"/>
-      <widget class="DisplayList" name="dispList"/>
-     </widget>
-    </item>
-   </layout>
+   <property name="maximumSize">
+    <size>
+     <width>0</width>
+     <height>0</height>
+    </size>
+   </property>
   </widget>
   <widget class="MonitorDock" name="monDock">
    <property name="minimumSize">
@@ -46,7 +29,7 @@
     </size>
    </property>
    <attribute name="dockWidgetArea">
-    <number>2</number>
+    <number>8</number>
    </attribute>
   </widget>
   <widget class="QToolBar" name="mainToolBar">
@@ -221,22 +204,11 @@
   </action>
   <action name="actVar">
    <property name="text">
-    <string>变量…</string>
+    <string>导入变量…</string>
    </property>
   </action>
  </widget>
  <customwidgets>
-  <customwidget>
-   <class>PlotWidget</class>
-   <extends>QWidget</extends>
-   <header>gui/plot_widget.h</header>
-   <container>0</container>
-  </customwidget>
-  <customwidget>
-   <class>DisplayList</class>
-   <extends>QTableWidget</extends>
-   <header>gui/display_list.h</header>
-  </customwidget>
   <customwidget>
    <class>MonitorDock</class>
    <extends>QDockWidget</extends>

@@ -3,7 +3,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets PrintSupport)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets PrintSupport Svg)
 
 set(QCUSTOMPLOT_DIR ${CMAKE_SOURCE_DIR}/third_party/qcustomplot/qcustomplot-source)
 
@@ -36,7 +36,7 @@ target_include_directories(GS32Scope PRIVATE
     ${QCUSTOMPLOT_DIR}
 )
 
-target_link_libraries(GS32Scope PRIVATE Qt6::Widgets Qt6::PrintSupport)
+target_link_libraries(GS32Scope PRIVATE Qt6::Widgets Qt6::PrintSupport Qt6::Svg)
 
 # 运行目录放一份 drivers/(开发时直接从构建树执行)
 add_custom_command(TARGET GS32Scope POST_BUILD

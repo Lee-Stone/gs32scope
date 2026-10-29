@@ -3,11 +3,10 @@
 #include <QApplication>
 #include <QCursor>
 #include <QFont>
-#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMenu>
 #include <QPainter>
-#include <QPushButton>
+#include <QPalette>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QStyle>
@@ -20,11 +19,11 @@ namespace {
 enum { ColDraw = 0, ColName = 1, ColType = 2, ColAddr = 3, ColSize = 4,
        ColVal = 5, ColMax = 6, ColMin = 7, ColAvg = 8 };
 
-/* 复选框列: 默认样式把 indicator 贴左; 这里只画底色/选中态, 把勾选框放在单元格中心 */
-class CenteredCheckDelegate : public QStyledItemDelegate
+/* 波形列: 选中时直接画该变量对应的波形颜色(不再画对勾) */
+class WaveColorDelegate : public QStyledItemDelegate
 {
 public:
-    explicit CenteredCheckDelegate(QObject* parent = nullptr)
+    explicit WaveColorDelegate(QObject* parent = nullptr)
         : QStyledItemDelegate(parent) {}
 
     void paint(QPainter* p, const QStyleOptionViewItem& option,
@@ -37,23 +36,36 @@ public:
             return;
         }
         const Qt::CheckState st = static_cast<Qt::CheckState>(cs.toInt());
+        QColor color = index.data(Qt::DecorationRole).value<QColor>();
+        if (!color.isValid()) color = QColor("#0a6cff");
+
         o.text.clear();
         o.icon = QIcon();
         o.features &= ~QStyleOptionViewItem::HasCheckIndicator;
         QApplication::style()->drawControl(QStyle::CE_ItemViewItem, &o, p, o.widget);
 
-        const int s = 16;
-        QStyleOptionViewItem c = o;
-        c.rect = QRect(option.rect.center().x() - s / 2,
-                       option.rect.center().y() - s / 2, s, s);
-        c.features = QStyleOptionViewItem::None;
-        c.state &= ~(QStyle::State_On | QStyle::State_Off | QStyle::State_NoChange);
-        c.state |= st == Qt::Checked ? QStyle::State_On
-                 : st == Qt::PartiallyChecked ? QStyle::State_NoChange
-                                              : QStyle::State_Off;
-        QApplication::style()->drawPrimitive(QStyle::PE_IndicatorItemViewItemCheck,
-                                             &c, p, o.widget);
+        const int s = 18;
+        const QRectF r(option.rect.center().x() - s / 2.0,
+                       option.rect.center().y() - s / 2.0, s, s);
+        const bool selected = option.state & QStyle::State_Selected;
+        const QColor border = selected
+            ? option.palette.color(QPalette::HighlightedText)
+            : option.palette.color(QPalette::PlaceholderText);
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing, true);
+        if (st == Qt::Unchecked) {
+            QColor fill = selected ? border : option.palette.color(QPalette::Base);
+            fill.setAlpha(selected ? 55 : 255);
+            p->setPen(QPen(border, 1.5));
+            p->setBrush(fill);
+        } else {
+            p->setPen(QPen(selected ? border : color.darker(135), 1.3));
+            p->setBrush(st == Qt::PartiallyChecked ? color.lighter(145) : color);
+        }
+        p->drawRoundedRect(r, 3, 3);
+        p->restore();
     }
+
 };
 } // namespace
 
@@ -68,21 +80,22 @@ MonitorDock::MonitorDock(QWidget* parent)
     tree_->setFont(mono);
     tree_->setColumnCount(9);
     tree_->setHeaderLabels({"波形", "变量", "类型", "地址", "大小",
-                            "当前值", "最大", "最小", "均值"});
+                            "当前值", "最大值", "最小值", "平均值"});
     tree_->header()->setSectionResizeMode(QHeaderView::Interactive);
     tree_->header()->setStretchLastSection(false);
-    tree_->setColumnWidth(ColDraw, 44);
-    tree_->setColumnWidth(ColName, 150);
-    tree_->setColumnWidth(ColType, 60);
-    tree_->setColumnWidth(ColAddr, 90);
-    tree_->setColumnWidth(ColSize, 40);
-    tree_->setColumnWidth(ColVal, 100);
-    tree_->setColumnWidth(ColMax, 80);
-    tree_->setColumnWidth(ColMin, 80);
-    tree_->setColumnWidth(ColAvg, 80);
+    tree_->setColumnWidth(ColDraw, 36);
+    tree_->setColumnWidth(ColName, 110);
+    tree_->setColumnWidth(ColType, 48);
+    tree_->setColumnWidth(ColAddr, 100);
+    tree_->setColumnWidth(ColSize, 32);
+    tree_->setColumnWidth(ColVal, 70);
+    tree_->setColumnWidth(ColMax, 58);
+    tree_->setColumnWidth(ColMin, 58);
+    tree_->setColumnWidth(ColAvg, 58);
+    tree_->header()->setMinimumSectionSize(30);
     tree_->header()->setSectionResizeMode(ColName, QHeaderView::Stretch);
     tree_->header()->setDefaultAlignment(Qt::AlignCenter);
-    tree_->setItemDelegateForColumn(ColDraw, new CenteredCheckDelegate(tree_));
+    tree_->setItemDelegateForColumn(ColDraw, new WaveColorDelegate(tree_));
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested,
             this, &MonitorDock::onContextMenu);
@@ -100,34 +113,10 @@ MonitorDock::MonitorDock(QWidget* parent)
     auto* container = new QWidget(this);
     auto* lay = new QVBoxLayout(container);
     lay->setContentsMargins(4, 4, 4, 4);
-    lay->setSpacing(4);
-    auto* bar = new QHBoxLayout();
-    bar->setSpacing(8);
-    auto* addWave = new QPushButton("加入波形", container);
-    auto* rmWave = new QPushButton("移出波形", container);
-    auto* addVar = new QPushButton("添加变量…", container);
-    addWave->setToolTip("把当前选中行(叶子/结构体整组)加入波形");
-    rmWave->setToolTip("把当前选中行(叶子/结构体整组)移出波形");
-    for (auto* b : {addWave, rmWave, addVar}) {
-        b->setFixedHeight(28);
-        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    }
-    connect(addWave, &QPushButton::clicked, this, [this] { toggleCurrentShown(true); });
-    connect(rmWave, &QPushButton::clicked, this, [this] { toggleCurrentShown(false); });
-    connect(addVar, &QPushButton::clicked, this, [this] { emit addVariableRequested(); });
-    bar->addWidget(addWave, 1);
-    bar->addWidget(rmWave, 1);
-    bar->addWidget(addVar, 1);
-    lay->addLayout(bar);
+    lay->setSpacing(0);
     lay->addWidget(tree_, 1);
     setWidget(container);
-    setMinimumWidth(360);
-    /* 默认只显示 波形|变量|地址|当前值; 其余列通过表头右键开启 */
-    tree_->setColumnHidden(ColType, true);
-    tree_->setColumnHidden(ColSize, true);
-    tree_->setColumnHidden(ColMax, true);
-    tree_->setColumnHidden(ColMin, true);
-    tree_->setColumnHidden(ColAvg, true);
+    setMinimumWidth(460);
 }
 
 void MonitorDock::setMonitorModel(MonitorModel* model) {
@@ -143,6 +132,7 @@ static void fillNode(QTreeWidgetItem* it, const MonitorNode* node,
                      const MonitorModel* model, int rootIdx) {
     it->setData(ColName, Qt::UserRole, rootIdx);
     it->setData(ColName, Qt::UserRole + 2, node->path);
+    it->setData(ColDraw, Qt::DecorationRole, model->root(rootIdx).color);
     it->setText(ColName, node->name);
     if (node->isStruct) {
         it->setData(ColName, Qt::UserRole + 1, -1);
@@ -312,15 +302,6 @@ void MonitorDock::applyShown(QTreeWidgetItem* item, bool on) {
         model_->setLeavesShown(leaves, on);
 }
 
-void MonitorDock::toggleCurrentShown(bool on) {
-    if (!model_) return;
-    auto* it = tree_->currentItem();
-    if (!it) return;
-    suppressDrawSync_ = true;
-    applyShown(it, on);
-    suppressDrawSync_ = false;
-    syncDrawChecks();
-}
 
 void MonitorDock::onItemChanged(QTreeWidgetItem* item, int col) {
     if (rebuilding_ || !item || col != ColDraw || !model_) return;
@@ -333,7 +314,6 @@ void MonitorDock::onItemChanged(QTreeWidgetItem* item, int col) {
 
 void MonitorDock::onContextMenu(const QPoint& pos) {
     QMenu menu(this);
-    menu.addAction("添加变量…", this, [this] { emit addVariableRequested(); });
     auto* it = tree_->itemAt(pos);
     if (it) {
         const int li = it->data(ColName, Qt::UserRole + 1).toInt();

@@ -9,6 +9,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QGuiApplication>
@@ -24,12 +25,11 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
-#include <QSplitter>
+#include <QPlainTextEdit>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyleFactory>
 #include <QStyleHints>
-#include <QTabWidget>
 #include <QToolBar>
 #include <algorithm>
 #include <cmath>
@@ -83,7 +83,6 @@ MainWindow::MainWindow() {
     connect(model_, &MonitorModel::leafShownChanged,
             this, &MainWindow::onLeafShownChanged);
     connect(model_, &MonitorModel::leavesShownChanged, this, [this] {
-        dispList_->rebuild();
         syncPlotChannels();
     });
 
@@ -98,6 +97,7 @@ MainWindow::MainWindow() {
 
     /* 恢复上次会话: 工具栏参数 + 变量对话框(重导入文件 + 重放勾选)。
      * 首次启动(未完成过正常关闭)保持空白仪表盘/波形; 正常关闭后写入 initialized. */
+    bool restoredDockState = false;
     {
         QSettings s;
         const bool initialized = s.value("session/initialized", false).toBool();
@@ -122,12 +122,16 @@ MainWindow::MainWindow() {
             varDialog_->restoreState(s);
             restoreSessionLeaves(s);
             dashboard_->restoreState(s);
+            const QByteArray dockState = s.value("window/dockState").toByteArray();
+            if (!dockState.isEmpty()) restoredDockState = restoreState(dockState);
         } else {
             dashboard_->clearAll();   /* 首次启动: 不继承任何仪表盘/波形 */
         }
         themeMode_ = s.value("appearance/theme", "system").toString();
         applyTheme(themeMode_);
     }
+    if (!restoredDockState)
+        QTimer::singleShot(0, this, &MainWindow::defaultDockLayout);
 
     /* 跟随系统: Windows 深浅色切换时实时重刷 */
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
@@ -155,16 +159,10 @@ MainWindow::MainWindow() {
     }
 
     /* 监控栏右键 -> 对话框 */
-    connect(monDock_, &MonitorDock::addVariableRequested,
-            this, &MainWindow::onOpenVariableDialog);
     connect(monDock_, &MonitorDock::removeRootRequested,
             this, &MainWindow::onRemoveRoot);
     connect(monDock_, &MonitorDock::writeRequested,
             this, &MainWindow::onWriteLeaf);
-
-    /* 绘制列表 -> 添加波形变量 */
-    connect(dispList_, &DisplayList::addVariableRequested,
-            this, &MainWindow::onOpenVariableDialog);
 
     uiTimer_.setInterval(100);
     connect(&uiTimer_, &QTimer::timeout, this, &MainWindow::onUiTick);
@@ -176,7 +174,7 @@ MainWindow::MainWindow() {
     });
     plotTimer_.start();
 
-    setStatus("就绪 - 选择后端并连接; 点「变量…」选择监控变量");
+    setStatus("就绪 - 选择后端并连接; 点「导入变量…」选择监控变量");
 }
 
 /* ---------------- UI / 主题 ---------------- */
@@ -254,8 +252,11 @@ QString makeStyleSheet(bool dark) {
          ";border-radius:4px;padding:4px 14px;}";
     q += "QPushButton:hover{background:" + btnHover + ";}";
     q += "QPushButton:disabled{color:" + disabled + ";background:" + bg + ";border-color:" + border + ";}";
-    q += "QDockWidget{color:" + text + ";}";
-    q += "QDockWidget::title{background:" + panel2 + ";color:" + muted + ";padding:5px;}";
+    q += "QDockWidget{color:" + text + ";font-size:14px;font-weight:600;}";
+    q += "QDockWidget::title{background:" + panel2 + ";color:" + muted +
+         ";padding:5px;text-align:center;}";
+    q += "QPlainTextEdit#logView{background:" + panel + ";color:" + text +
+         ";border:none;font-size:12px;selection-background-color:" + sel + ";}";
     q += "QTabWidget::pane{border:1px solid " + border + ";background:" + panel + ";}";
     q += "QTabBar::tab{background:" + btn + ";color:" + text + ";border:1px solid " + border2 +
          ";border-bottom:none;padding:5px 16px;margin-right:2px;"
@@ -354,6 +355,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     s.setValue("toolbar/tck", ui->tckBox->currentText());
     s.setValue("appearance/theme", themeMode_);
     s.setValue("session/initialized", true);
+    s.setValue("window/dockState", saveState());
     varDialog_->saveState(s);
     saveSessionLeaves(s);
     dashboard_->saveState(s);
@@ -391,9 +393,7 @@ void MainWindow::buildUi() {
     actDisc_ = ui->actDisc;
     actStart_ = ui->actStart;
     actSingle_ = ui->actSingle;
-    plot_ = ui->plot;
     monDock_ = ui->monDock;
-    dispList_ = ui->dispList;
 
     /* 后端显示名映射(实际后端名存 userData, 连接时取回) */
     const QStringList backends = LinkDriver::scanDrivers();
@@ -410,22 +410,72 @@ void MainWindow::buildUi() {
         if (simIdx >= 0) backendBox_->setCurrentIndex(simIdx);   /* 默认选仿真 */
     }
 
-    /* 波形:绘制列表 = 3:1; 波形与仪表盘放在左侧同一个 Tab 里 */
+    /* 四块停靠面板: 波形+仪表盘(上排等宽) / 监控+日志(下排等宽) */
+    plot_ = new PlotWidget(this);
     dashboard_ = new DashboardWidget(this);
     dashboard_->setMonitorModel(model_);
-    leftTabs_ = new QTabWidget(this);
-    leftTabs_->addTab(plot_, "波形");
-    leftTabs_->addTab(dashboard_, "仪表盘");
-    ui->mainSplitter->insertWidget(0, leftTabs_);
-    ui->mainSplitter->setStretchFactor(0, 3);
-    ui->mainSplitter->setStretchFactor(1, 1);
-    ui->mainSplitter->setSizes({540, 180});
     connect(dashboard_, &DashboardWidget::writeRequested,
             this, &MainWindow::onDashboardWrite);
 
-    monDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    plotDock_ = new QDockWidget("波形", this);
+    plotDock_->setObjectName("plotDock");
+    plotDock_->setMinimumWidth(300);
+    plotDock_->setWidget(plot_);
+    plotDock_->setFeatures(QDockWidget::DockWidgetMovable |
+                           QDockWidget::DockWidgetFloatable |
+                           QDockWidget::DockWidgetClosable);
+    plotDock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+    plotDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    plotDock_->setMinimumHeight(480);
+
+    dashDock_ = new QDockWidget("仪表盘", this);
+    dashDock_->setObjectName("dashDock");
+    dashDock_->setMinimumWidth(300);
+    dashDock_->setWidget(dashboard_);
+    dashDock_->setFeatures(QDockWidget::DockWidgetMovable |
+                           QDockWidget::DockWidgetFloatable |
+                           QDockWidget::DockWidgetClosable);
+    dashDock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+    dashDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    dashDock_->setMinimumHeight(480);
+
+    logView_ = new QPlainTextEdit(this);
+    logView_->setObjectName("logView");
+    logView_->setReadOnly(true);
+    logView_->setMaximumBlockCount(5000);
+    logView_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    {
+        QFont mono("Consolas");
+        mono.setStyleHint(QFont::Monospace);
+        mono.setPointSize(9);
+        logView_->setFont(mono);
+    }
+    logDock_ = new QDockWidget("日志", this);
+    logDock_->setObjectName("logDock");
+    logDock_->setWidget(logView_);
+    logDock_->setFeatures(QDockWidget::DockWidgetMovable |
+                          QDockWidget::DockWidgetFloatable |
+                          QDockWidget::DockWidgetClosable);
+    logDock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+    logDock_->setMinimumHeight(110);
+    logDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    monDock_->setFeatures(QDockWidget::DockWidgetMovable |
+                          QDockWidget::DockWidgetFloatable |
+                          QDockWidget::DockWidgetClosable);
+    monDock_->setAllowedAreas(Qt::AllDockWidgetAreas);
+    monDock_->setMinimumWidth(540);
+    monDock_->setMinimumHeight(110);
+    monDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     monDock_->setMonitorModel(model_);
-    dispList_->setMonitorModel(model_);
+
+    setDockOptions(QMainWindow::AnimatedDocks);
+    addDockWidget(Qt::TopDockWidgetArea, plotDock_);
+    addDockWidget(Qt::TopDockWidgetArea, dashDock_);
+    splitDockWidget(plotDock_, dashDock_, Qt::Horizontal);
+    addDockWidget(Qt::BottomDockWidgetArea, monDock_);
+    addDockWidget(Qt::BottomDockWidgetArea, logDock_);
+    splitDockWidget(monDock_, logDock_, Qt::Horizontal);
 
     connect(actConn_, &QAction::triggered, this, &MainWindow::onConnectClicked);
     connect(actDisc_, &QAction::triggered, this, &MainWindow::onDisconnectClicked);
@@ -449,8 +499,25 @@ void MainWindow::buildUi() {
     dataMenu->addAction(actCsv_);
     dataMenu->addAction(actClear_);
     auto* viewMenu = menuBar()->addMenu("视图(&V)");
-    viewMenu->addAction("波形", this, [this] { leftTabs_->setCurrentIndex(0); });
-    viewMenu->addAction("仪表盘", this, [this] { leftTabs_->setCurrentIndex(1); });
+    auto addDockToggle = [viewMenu](QDockWidget* dock) {
+        if (!dock) return;
+        QAction* act = viewMenu->addAction(dock->windowTitle());
+        act->setCheckable(true);
+        act->setChecked(dock->isVisible());
+        QObject::connect(act, &QAction::triggered, dock,
+                         [dock](bool on) { dock->setVisible(on); });
+        QObject::connect(dock, &QDockWidget::visibilityChanged, act,
+                         [act](bool visible) {
+            QSignalBlocker block(act);
+            act->setChecked(visible);
+        });
+    };
+    addDockToggle(plotDock_);
+    addDockToggle(dashDock_);
+    addDockToggle(monDock_);
+    addDockToggle(logDock_);
+    viewMenu->addSeparator();
+    viewMenu->addAction("重置面板布局", this, &MainWindow::defaultDockLayout);
 
     /* 顶部参数区统一高度; 宽度按内容分配, 避免大框小字/小框挤字 */
     const int kCtlH = 30;
@@ -497,6 +564,50 @@ void MainWindow::buildUi() {
     });
 }
 
+void MainWindow::defaultDockLayout() {
+    if (!monDock_ || !plotDock_ || !dashDock_ || !logDock_) return;
+    for (QDockWidget* d : std::initializer_list<QDockWidget*>{
+             plotDock_, dashDock_, static_cast<QDockWidget*>(monDock_), logDock_}) {
+        d->setFloating(false);
+        d->show();
+        removeDockWidget(d);
+    }
+    addDockWidget(Qt::TopDockWidgetArea, plotDock_);
+    addDockWidget(Qt::TopDockWidgetArea, dashDock_);
+    splitDockWidget(plotDock_, dashDock_, Qt::Horizontal);
+    addDockWidget(Qt::BottomDockWidgetArea, monDock_);
+    addDockWidget(Qt::BottomDockWidgetArea, logDock_);
+    splitDockWidget(monDock_, logDock_, Qt::Horizontal);
+    monDock_->show();
+    plotDock_->show();
+    dashDock_->show();
+    logDock_->show();
+    applyDockSizes();
+    QTimer::singleShot(120, this, &MainWindow::applyDockSizes);
+    QTimer::singleShot(400, this, &MainWindow::applyDockSizes);
+}
+
+void MainWindow::applyDockSizes() {
+    if (!monDock_ || !plotDock_ || !dashDock_ || !logDock_) return;
+    const int half = std::max(320, width() / 2);
+    const int bottom = std::max(160, height() / 3);
+    resizeDocks({plotDock_, dashDock_}, {half, half}, Qt::Horizontal);
+    resizeDocks({monDock_, logDock_}, {half, half}, Qt::Horizontal);
+    resizeDocks({monDock_, logDock_}, {bottom}, Qt::Vertical);
+}
+
+void MainWindow::appendLog(const QString& msg) {
+    if (!logView_ || msg.isEmpty()) return;
+    const QString ts = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    logView_->appendPlainText(QStringLiteral("[%1] %2").arg(ts, msg));
+}
+
+void MainWindow::beginTimelineSegment() {
+    /* 下一次 batch 重新取 raw 基准, 逻辑时间从 lastLogicalNs_ 继续;
+     * 停采期间不累积时间, 恢复时波形不会跳过空白区间. */
+    timelineStarted_ = false;
+}
+
 /* ---------------- 连接 ---------------- */
 void MainWindow::onConnectClicked() {
     const QString backend = backendBox_->currentData().toString();
@@ -540,7 +651,8 @@ void MainWindow::onConnectClicked() {
     /* 新连接 = 新会话时间轴, 清空旧波形/历史 */
     plot_->clearData();
     history_.clear();
-    t0Ns_ = 0;
+    timelineStarted_ = false;
+    timelineRawBaseNs_ = timelineLogicalBaseNs_ = lastLogicalNs_ = 0;
     actConn_->setEnabled(false); actDisc_->setEnabled(true);
     setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/TCK, 采样率未采样时仍可调 */
     updateStartAction();   /* 连续/单次采样按钮同条件使能 */
@@ -575,14 +687,18 @@ bool MainWindow::startSampling(QString* err) {
     const int hz = rateHz();
     const int intervalMs = std::max(1, int(std::lround(1000.0 / hz)));
     engine_->configure(&link_, intervalMs, model_);
+    bool ok = false;
     if (hz > 1000) {
         if (!link_.hasCap(GS32_CAP_STREAM)) {
             if (err) *err = QStringLiteral("当前后端不支持 %1Hz；10kHz 需要 STREAM 后端").arg(hz);
             return false;
         }
-        return engine_->startStream(uint32_t(std::llround(1e9 / double(hz))), err);
+        ok = engine_->startStream(uint32_t(std::llround(1e9 / double(hz))), err);
+    } else {
+        ok = engine_->start(err);
     }
-    return engine_->start(err);
+    if (ok) beginTimelineSegment();
+    return ok;
 }
 
 void MainWindow::onStartClicked() {
@@ -618,6 +734,7 @@ void MainWindow::onSingleClicked() {
     engine_->configure(&link_, intervalMs, model_);
     QString err;
     if (!engine_->startSingle(&err)) { setStatus("启动采样失败: " + err, true); return; }
+    beginTimelineSegment();
     actStart_->setEnabled(false);
     actSingle_->setEnabled(false);
     actSingle_->setText("等待停止");
@@ -762,7 +879,6 @@ void MainWindow::onRemoveRoot(int rootIdx) {
 void MainWindow::onModelChanged() {
     pruneHistory();
     monDock_->rebuild();
-    dispList_->rebuild();
     syncPlotChannels();
     dashboard_->refresh();
     reconfigureEngine();
@@ -770,7 +886,6 @@ void MainWindow::onModelChanged() {
 }
 
 void MainWindow::onLeafShownChanged(int) {
-    dispList_->rebuild();
     syncPlotChannels();
 }
 
@@ -856,11 +971,21 @@ void MainWindow::syncPlotChannels() {
 /* ---------------- 数据流 ---------------- */
 void MainWindow::onBatchReady(const SampleBatch& batch) {
     if (batch.tNs.isEmpty()) return;
-    if (t0Ns_ == 0) t0Ns_ = batch.tNs.first();
+
+    /* 逻辑时间轴: 每次开始采样建立新 raw 基准, 从 lastLogicalNs_ 继续.
+     * 停止期间 raw 时间仍在走, 但逻辑时间不累积, 恢复后不会跳空. */
+    if (!timelineStarted_) {
+        timelineRawBaseNs_ = batch.tNs.first();
+        timelineLogicalBaseNs_ = lastLogicalNs_;
+        timelineStarted_ = true;
+    }
+    const qint64 offsetNs = timelineLogicalBaseNs_ - timelineRawBaseNs_;
+    const qint64 lastLogical = batch.tNs.last() + offsetNs;
+    lastLogicalNs_ = lastLogical;
 
     constexpr double kHistorySec = 60.0;
     constexpr int kMaxHistoryPoints = 30000;   /* 每叶子约 30s@1kHz 或 60s@500Hz */
-    const double tNow = (batch.tNs.last() - t0Ns_) / 1e9;
+    const double tNow = double(lastLogical) / 1e9;
 
     for (int k = 0; k < batch.values.size() && k < model_->leafCount(); ++k) {
         const auto& vals = batch.values[k];
@@ -872,7 +997,7 @@ void MainWindow::onBatchReady(const SampleBatch& batch) {
         QVector<QPointF> pts;
         pts.reserve(n);
         for (int i = 0; i < n; ++i) {
-            const double t = (batch.tNs[i] - t0Ns_) / 1e9;
+            const double t = double(batch.tNs[i] + offsetNs) / 1e9;
             pts.append(QPointF(t, vals[i]));
         }
 
@@ -907,7 +1032,6 @@ void MainWindow::onStats(const EngineStats& st) {
 
 void MainWindow::onUiTick() {
     monDock_->refresh();
-    dispList_->refreshStats();
     dashboard_->refresh();
 }
 
@@ -932,7 +1056,8 @@ void MainWindow::onExportCsv() {
 void MainWindow::onClearPlot() {
     plot_->clearData();
     history_.clear();
-    t0Ns_ = 0;
+    timelineStarted_ = false;
+    timelineRawBaseNs_ = timelineLogicalBaseNs_ = lastLogicalNs_ = 0;
     setStatus("已清空波形与历史");
 }
 
@@ -1045,9 +1170,8 @@ bool MainWindow::ensureDemoReady() {
     }
 
     loadSimDemoVariables();
-    if (leftTabs_) leftTabs_->setCurrentWidget(dashboard_);
+    if (dashDock_) { dashDock_->show(); dashDock_->raise(); }
     if (dashboard_->itemCount() == 0) dashboard_->createDemoPanel();
-    if (leftTabs_) leftTabs_->setCurrentWidget(dashboard_);   /* 创建后再确认一次 */
     return true;
 }
 
@@ -1058,8 +1182,8 @@ void MainWindow::onSimDemo() {
 
 void MainWindow::onStreamDemo() {
     if (!ensureDemoReady()) return;
-    if (leftTabs_) leftTabs_->setCurrentWidget(plot_);   /* 10kHz 演示先展示波形 */
-    intervalSpin_->setValue(10000);                      /* 10kHz -> STREAM */
+    if (plotDock_) { plotDock_->show(); plotDock_->raise(); }  /* 10kHz 演示聚焦波形 */
+    intervalSpin_->setValue(10000);                           /* 10kHz -> STREAM */
     if (!engine_->running() && !stopping_) onStartClicked();
 }
 
@@ -1076,4 +1200,5 @@ void MainWindow::setStatus(const QString& msg, bool isError) {
     QLabel* lb = statusMsgLabel();
     lb->setStyleSheet(isError ? "color:#ff5c7a;" : "");
     lb->setText(msg);
+    appendLog(msg);
 }

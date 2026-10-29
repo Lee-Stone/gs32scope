@@ -1,11 +1,9 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 /*
- * MainWindow - GS32Scope 主界面 (v1.3 三区布局)
- * 左上部: 波形窗口(单窗口, 每通道 Y 轴/Vdiv/offset)
- * 左下部: 显示变量列表
- * 右侧:   监控变量栏(树形统计)
- * 顶部:   连接/采样工具栏 + 变量选择入口
+ * MainWindow - GS32Scope 主界面
+ * 波形+仪表盘(上排等宽) / 监控变量+日志(下排等宽), 四块均为可停靠面板
+ * 顶部: 连接/采样工具栏 + 变量选择入口
  */
 #include <QMainWindow>
 #include <QHash>
@@ -17,7 +15,6 @@
 #include "core/monitor_model.h"
 #include "gui/plot_widget.h"
 #include "gui/monitor_dock.h"
-#include "gui/display_list.h"
 
 class QComboBox;
 class QSpinBox;
@@ -25,10 +22,10 @@ class QLabel;
 class QAction;
 class QActionGroup;
 class QLineEdit;
-class QTabWidget;
+class QDockWidget;
+class QPlainTextEdit;
 class VariableDialog;
 class DashboardWidget;
-class QSplitter;
 
 namespace Ui { class MainWindow; }
 
@@ -77,6 +74,10 @@ private:
     int  rateHz() const;
     void syncPlotChannels();
     void pruneHistory();
+    void defaultDockLayout();
+    void applyDockSizes();
+    void appendLog(const QString& msg);
+    void beginTimelineSegment();
     void saveSessionLeaves(QSettings& s) const;
     void restoreSessionLeaves(QSettings& s);
     bool writeVariable(const QString& path, double value, bool confirm);
@@ -117,13 +118,18 @@ private:
     QString      themeMode_ = QStringLiteral("system");
     PlotWidget*  plot_ = nullptr;
     MonitorDock* monDock_ = nullptr;
-    DisplayList* dispList_ = nullptr;
     DashboardWidget* dashboard_ = nullptr;
-    QTabWidget*  leftTabs_ = nullptr;   /* 波形 / 仪表盘 */
+    QDockWidget* plotDock_ = nullptr;
+    QDockWidget* dashDock_ = nullptr;
+    QDockWidget* logDock_ = nullptr;
+    QPlainTextEdit* logView_ = nullptr;
 
-    /* 会话时间轴与各叶子最近 60s 历史(用于新通道回放) */
+    /* 会话时间轴(停止/继续时去除停采时间)与各叶子历史(用于新通道回放) */
     QHash<QString, QVector<QPointF>> history_;
-    qint64 t0Ns_ = 0;
+    qint64 timelineRawBaseNs_ = 0;
+    qint64 timelineLogicalBaseNs_ = 0;
+    qint64 lastLogicalNs_ = 0;
+    bool   timelineStarted_ = false;
     QTimer plotTimer_;                  /* 30fps 重绘, 与采样/批处理解耦 */
 };
 

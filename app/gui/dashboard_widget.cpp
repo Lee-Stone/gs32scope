@@ -589,22 +589,14 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     auto* clear = new QPushButton("清空", this);
     connect(demo, &QPushButton::clicked, this, &DashboardWidget::createDemoPanel);
     connect(clear, &QPushButton::clicked, this, &DashboardWidget::clearAll);
-    auto* hint = new QLabel("拖动组件自动吸附到网格；右键绑定/移除；数值、滑块、开关可直接写入目标", this);
-    hint->setStyleSheet(QString());
-    {
-        QPalette hp = hint->palette();
-        hp.setColor(QPalette::WindowText, hp.color(QPalette::PlaceholderText));
-        hint->setPalette(hp);
-    }
     bar->addWidget(add);
     bar->addWidget(demo);
     bar->addWidget(clear);
-    bar->addSpacing(12);
-    bar->addWidget(hint, 1);
+    bar->addStretch(1);
     root->addLayout(bar);
 
     canvas_ = new DashboardCanvas(this, this);
-    canvas_->setMinimumSize(600, 420);
+    canvas_->setMinimumSize(300, 260);
     canvas_->setStyleSheet("border:none;");
     scroll_ = new QScrollArea(this);
     scroll_->setWidgetResizable(true);

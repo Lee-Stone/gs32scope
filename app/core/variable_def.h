@@ -11,7 +11,8 @@
 #include <cstdint>
 
 struct VariableDef {
-    enum Type { Float, Int8, Int16, Int32, Uint8, Uint16, Uint32 };
+    enum Type { Float, Double, Int8, Int16, Int32, Int64,
+                Uint8, Uint16, Uint32, Uint64 };
     QString  name;        /* 全路径名: "sim.vehicle.speed" / "USART1.SR.TXE" */
     uint32_t addr = 0;    /* 读取地址 */
     uint32_t size = 4;    /* 读取字节数 */
@@ -44,14 +45,22 @@ inline QString shortVarName(const QString& full) {
 inline const char* typeName(VariableDef::Type t) {
     switch (t) {
     case VariableDef::Float:  return "float";
+    case VariableDef::Double: return "double";
     case VariableDef::Int8:   return "int8";
     case VariableDef::Int16:  return "int16";
     case VariableDef::Int32:  return "int32";
+    case VariableDef::Int64:  return "int64";
     case VariableDef::Uint8:  return "uint8";
     case VariableDef::Uint16: return "uint16";
     case VariableDef::Uint32: return "uint32";
+    case VariableDef::Uint64: return "uint64";
     }
     return "?";
+}
+
+/* 浮点类型(显示时用小数格式) */
+inline bool isFloatType(VariableDef::Type t) {
+    return t == VariableDef::Float || t == VariableDef::Double;
 }
 
 /* 变量名排序: 不区分大小写按字母升序; 同字母大小写相遇时小写在前 */

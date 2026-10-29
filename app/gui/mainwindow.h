@@ -8,7 +8,10 @@
  * 顶部:   连接/采样工具栏 + 变量选择入口
  */
 #include <QMainWindow>
+#include <QHash>
+#include <QPointF>
 #include <QTimer>
+#include <QVector>
 #include "link/link_driver.h"
 #include "core/sample_engine.h"
 #include "core/monitor_model.h"
@@ -20,8 +23,11 @@ class QComboBox;
 class QSpinBox;
 class QLabel;
 class QAction;
+class QActionGroup;
 class QLineEdit;
+class QTabWidget;
 class VariableDialog;
+class DashboardWidget;
 class QSplitter;
 
 namespace Ui { class MainWindow; }
@@ -53,14 +59,23 @@ private slots:
     void onStats(const EngineStats& st);
     void onUiTick();
     void onEngineStopped();
+    void onExportCsv();
+    void onClearPlot();
+    void onWriteLeaf(int leafIdx);
+    void onDashboardWrite(const QString& path, double value);
+    void onSimDemo();
 
 private:
     void buildUi();
-    void applyLightTheme();   /* 浅色主题; 波形区独立保持暗色 */
+    void applyTheme(const QString& mode);   /* light / dark / system */
+    bool systemPrefersDark() const;
     void reconfigureEngine();
     void updateStartAction();
     void setConnControlsEnabled(bool on);  /* 通讯接口/目标/采样间隔/TCK 连接期间禁用 */
     void syncPlotChannels();
+    void pruneHistory();
+    bool writeVariable(const QString& path, double value, bool confirm);
+    void loadSimDemoVariables();
     void setStatus(const QString& msg, bool isError = false);
     QLabel* statusMsgLabel();      /* 状态栏左侧消息(懒创建) */
 
@@ -86,9 +101,24 @@ private:
     QAction*     actDisc_ = nullptr;
     QAction*     actStart_ = nullptr;   /* 连续采样: 文本在 连续采样/停止采样/停止中… 间切换 */
     QAction*     actSingle_ = nullptr;  /* 单次采样: 一拍即停 */
+    QAction*     actCsv_ = nullptr;     /* 导出波形 CSV */
+    QAction*     actClear_ = nullptr;   /* 清空波形/历史 */
+    QAction*     actSimDemo_ = nullptr; /* 一键仿真演示 */
+    QAction*     themeLight_ = nullptr;
+    QAction*     themeDark_ = nullptr;
+    QAction*     themeSystem_ = nullptr;
+    QActionGroup* themeGroup_ = nullptr;
+    QString      themeMode_ = QStringLiteral("system");
     PlotWidget*  plot_ = nullptr;
     MonitorDock* monDock_ = nullptr;
     DisplayList* dispList_ = nullptr;
+    DashboardWidget* dashboard_ = nullptr;
+    QTabWidget*  leftTabs_ = nullptr;   /* 波形 / 仪表盘 */
+
+    /* 会话时间轴与各叶子最近 60s 历史(用于新通道回放) */
+    QHash<QString, QVector<QPointF>> history_;
+    qint64 t0Ns_ = 0;
+    QTimer plotTimer_;                  /* 30fps 重绘, 与采样/批处理解耦 */
 };
 
 #endif /* MAINWINDOW_H */

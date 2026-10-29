@@ -20,6 +20,10 @@ public:
 
     void saveState(QSettings& s) const;   /* 持久化: 导入文件/勾选状态 */
     void restoreState(QSettings& s);      /* 启动恢复: 重导入文件 + 重放勾选 */
+    /* 启动参数/自动化入口: 静默导入 + 监控所有顶层变量/外设 */
+    bool importElf(const QString& path);
+    bool importSvd(const QString& path);
+    void monitorAll();
 
 signals:
     void monitorAdded(const DwarfVar& v);

@@ -37,3 +37,25 @@ endif()
 set_target_properties(gs32link_gslink PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${GS32_DRIVERS_DIR}
     PREFIX "")
+
+# ---- SCI(串口/TCP 测试) 驱动 ----
+add_library(gs32link_sci SHARED
+    drivers/sci/sci_driver.cpp
+)
+target_include_directories(gs32link_sci PRIVATE ${GS32LINK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/common)
+target_compile_definitions(gs32link_sci PRIVATE GS32LINK_BUILDING)
+target_link_libraries(gs32link_sci PRIVATE ws2_32)
+set_target_properties(gs32link_sci PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${GS32_DRIVERS_DIR}
+    PREFIX "")
+
+# ---- CAN 网关(TCP/CAN-Ethernet 桥, 与 SCI 同帧协议) ----
+add_library(gs32link_can SHARED
+    drivers/sci/sci_driver.cpp
+)
+target_include_directories(gs32link_can PRIVATE ${GS32LINK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/common)
+target_compile_definitions(gs32link_can PRIVATE GS32LINK_BUILDING GS32LINK_DRIVER_CAN)
+target_link_libraries(gs32link_can PRIVATE ws2_32)
+set_target_properties(gs32link_can PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${GS32_DRIVERS_DIR}
+    PREFIX "")

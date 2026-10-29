@@ -121,7 +121,7 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
 
     tree_ = new QTreeWidget(this);
     tree_->setColumnCount(5);
-    tree_->setHeaderLabels({"变量", "地址", "大小", "类型", "绘制"});
+    tree_->setHeaderLabels({"变量", "地址", "大小", "类型", "波形"});
     tree_->setAlternatingRowColors(true);   /* 表格交替行色 */
     tree_->header()->setSectionResizeMode(QHeaderView::Interactive);
     tree_->header()->setDefaultAlignment(Qt::AlignCenter);   /* 表头居中 */
@@ -146,6 +146,42 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
     connect(tree_->header(), &QHeaderView::sortIndicatorChanged,
             this, &VariableDialog::onSortByColumn);
     connect(tree_, &QTreeWidget::itemChanged, this, &VariableDialog::onItemChanged);
+    /* 右键直接加入/移出波形, 作为「波形」列之外的第二入口 */
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        auto* it = tree_->itemAt(pos);
+        if (!it) return;
+        QMenu menu(this);
+        if (it->childCount() == 0 && (it->flags() & Qt::ItemIsUserCheckable)) {
+            const bool drawn = it->checkState(ColDraw) == Qt::Checked;
+            menu.addAction(drawn ? "从波形移除" : "添加到波形", this, [it, drawn] {
+                it->setCheckState(ColDraw, drawn ? Qt::Unchecked : Qt::Checked);
+            });
+        } else if (it->childCount() > 0) {
+            auto setDraw = [](QTreeWidgetItem* n, bool on, auto&& self) -> void {
+                if (n->childCount() == 0) {
+                    if (n->flags() & Qt::ItemIsUserCheckable)
+                        n->setCheckState(ColDraw, on ? Qt::Checked : Qt::Unchecked);
+                } else {
+                    for (int i = 0; i < n->childCount(); ++i)
+                        self(n->child(i), on, self);
+                }
+            };
+            menu.addAction("整组加入波形", this, [it, setDraw] {
+                setDraw(it, true, setDraw);
+            });
+            menu.addAction("整组移出波形", this, [it, setDraw] {
+                setDraw(it, false, setDraw);
+            });
+        }
+        if (it->flags() & Qt::ItemIsUserCheckable) {
+            const bool mon = it->checkState(ColName) == Qt::Checked;
+            menu.addAction(mon ? "取消监控" : "监控", this, [it, mon] {
+                it->setCheckState(ColName, mon ? Qt::Unchecked : Qt::Checked);
+            });
+        }
+        menu.exec(tree_->viewport()->mapToGlobal(pos));
+    });
     tree_->setItemDelegate(new FileGroupDelegate(tree_));   /* 源文件分组整行绘制 */
     lay->addWidget(tree_, 1);
 
@@ -277,6 +313,10 @@ void VariableDialog::addLeafItem(QTreeWidgetItem* parent, const VariableDef& v) 
     it->setText(ColType, v.bitOffset >= 0
         ? QString("%1:%2").arg(typeName(v.type)).arg(v.bitWidth)
         : QString::fromLatin1(typeName(v.type)));
+    it->setTextAlignment(ColName, Qt::AlignCenter);
+    it->setTextAlignment(ColAddr, Qt::AlignCenter);
+    it->setTextAlignment(ColSize, Qt::AlignCenter);
+    it->setTextAlignment(ColType, Qt::AlignCenter);
 }
 
 QString VariableDialog::itemPath(QTreeWidgetItem* it) const {
@@ -426,6 +466,10 @@ bool VariableDialog::importElfFile(const QString& path, bool interactive) {
                     ? QString("%1:%2").arg(typeName(v.type)).arg(v.bitWidth)
                     : (v.typeText.isEmpty() ? QString::fromLatin1(typeName(v.type)) : v.typeText));
             }
+            it->setTextAlignment(ColName, Qt::AlignCenter);
+            it->setTextAlignment(ColAddr, Qt::AlignCenter);
+            it->setTextAlignment(ColSize, Qt::AlignCenter);
+            it->setTextAlignment(ColType, Qt::AlignCenter);
         };
         for (const auto& v : dvars) addNode(fileNode(v.file), v);
     } else {
@@ -501,13 +545,25 @@ bool VariableDialog::importSvdFile(const QString& path, bool interactive) {
     for (const auto& peri : peris) {
         auto* pIt = new QTreeWidgetItem(root);
         pIt->setText(ColName, peri.name);
+        /* 外设整体监控时的读取跨度 = 最远寄存器末尾 - 基地址。
+         * 旧实现固定 size=4, 子寄存器分布在偏移上会导致采样缓冲越界。 */
+        uint32_t periSize = 4;
+        for (const auto& reg : peri.regs) {
+            if (reg.addr < peri.baseAddr) continue;
+            const uint32_t off = reg.addr - peri.baseAddr;
+            const uint32_t bytes = std::max<uint32_t>(reg.size / 8, 4);
+            periSize = std::max<uint32_t>(periSize, off + bytes);
+        }
         VariableDef pd;
-        pd.name = peri.name; pd.addr = peri.baseAddr; pd.size = 4;
+        pd.name = peri.name; pd.addr = peri.baseAddr; pd.size = periSize;
         pIt->setData(ColName, Qt::UserRole, QVariant::fromValue(pd));
         pIt->setFlags(pIt->flags() | Qt::ItemIsUserCheckable);
         pIt->setCheckState(ColName, Qt::Unchecked);
         pIt->setText(ColAddr, QStringLiteral("0x%1").arg(peri.baseAddr, 8, 16, QChar('0')));  /* 基地址 */
         pIt->setText(ColType, "外设");
+        pIt->setTextAlignment(ColName, Qt::AlignCenter);
+        pIt->setTextAlignment(ColAddr, Qt::AlignCenter);
+        pIt->setTextAlignment(ColType, Qt::AlignCenter);
         for (const auto& reg : peri.regs) {
             VariableDef rv;
             rv.name = peri.name + "." + reg.name;
@@ -523,6 +579,9 @@ bool VariableDialog::importSvdFile(const QString& path, bool interactive) {
                 rIt->setCheckState(ColName, Qt::Unchecked);
                 rIt->setText(ColAddr, "0x" + QString::number(rv.addr, 16).rightJustified(8, '0').toUpper());  /* 基地址 */
                 rIt->setText(ColType, "寄存器");
+                rIt->setTextAlignment(ColName, Qt::AlignCenter);
+                rIt->setTextAlignment(ColAddr, Qt::AlignCenter);
+                rIt->setTextAlignment(ColType, Qt::AlignCenter);
                 for (const auto& fld : reg.fields) {
                     VariableDef f = rv;
                     f.name = rv.name + "." + fld.name;
@@ -601,7 +660,65 @@ void VariableDialog::restoreState(QSettings& s) {
 void VariableDialog::onRemoveSelected() {
     const auto sel = tree_->selectedItems();
     if (sel.isEmpty()) return;
-    for (auto* it : sel) delete it;
+
+    /* 只处理最外层选中项(父子同时选中时删父即可), 先通知模型再删树项 */
+    QSet<QTreeWidgetItem*> tops;
+    for (auto* it : sel) {
+        bool parentSelected = false;
+        for (QTreeWidgetItem* p = it->parent(); p; p = p->parent())
+            if (sel.contains(p)) { parentSelected = true; break; }
+        if (!parentSelected) tops.insert(it);
+    }
+
+    std::function<void(QTreeWidgetItem*)> notify = [&](QTreeWidgetItem* it) {
+        const VariableDef d = it->data(ColName, Qt::UserRole).value<VariableDef>();
+        if (!d.name.isEmpty()) {
+            emit monitorRemoved(d.name);            /* 整根移除(名称匹配的根) */
+            if (it->childCount() == 0)
+                emit displayToggled(d, false);      /* 叶子同时移出绘制集 */
+        }
+        for (int i = 0; i < it->childCount(); ++i) notify(it->child(i));
+    };
+    for (auto* it : tops) notify(it);
+
+    /* 先摘除再 delete; 删除后清理空文件根 */
+    for (auto* it : tops) {
+        if (it->parent()) it->parent()->removeChild(it);
+        else tree_->takeTopLevelItem(tree_->indexOfTopLevelItem(it));
+        delete it;
+    }
+    for (int t = tree_->topLevelItemCount() - 1; t >= 0; --t)
+        if (tree_->topLevelItem(t)->childCount() == 0)
+            delete tree_->takeTopLevelItem(t);
+}
+
+bool VariableDialog::importElf(const QString& path) {
+    return importElfFile(path, false);
+}
+
+bool VariableDialog::importSvd(const QString& path) {
+    return importSvdFile(path, false);
+}
+
+void VariableDialog::monitorAll() {
+    /* 文件根 -> 源文件分组/外设 -> 变量: 勾选所有顶层变量/外设。
+     * 勾选父节点会由 onItemChanged 递归勾选子节点并入监控模型。 */
+    for (int t = 0; t < tree_->topLevelItemCount(); ++t) {
+        auto* fileRoot = tree_->topLevelItem(t);
+        for (int i = 0; i < fileRoot->childCount(); ++i) {
+            auto* c = fileRoot->child(i);
+            if (c->data(ColName, Qt::UserRole + 1).toInt() == 1) {
+                /* 源文件分组: 逐个变量 */
+                for (int k = 0; k < c->childCount(); ++k) {
+                    auto* v = c->child(k);
+                    if (v->flags() & Qt::ItemIsUserCheckable)
+                        v->setCheckState(ColName, Qt::Checked);
+                }
+            } else if (c->flags() & Qt::ItemIsUserCheckable) {
+                c->setCheckState(ColName, Qt::Checked);
+            }
+        }
+    }
 }
 
 void VariableDialog::onSearch(const QString& text) {

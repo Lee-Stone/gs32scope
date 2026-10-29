@@ -2,5 +2,9 @@
 <RCC version="1.0">
     <qresource prefix="/icons">
         <file>check.svg</file>
+        <file>arrow_up.svg</file>
+        <file>arrow_down.svg</file>
+        <file>arrow_up_light.svg</file>
+        <file>arrow_down_light.svg</file>
     </qresource>
 </RCC>

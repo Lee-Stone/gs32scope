@@ -61,10 +61,10 @@
    </attribute>
    <widget class="QLabel" name="labelBackend">
     <property name="text">
-     <string> Í¨Ñ¶½Ó¿Ú: </string>
+     <string> é€šè®¯æ¥å£: </string>
     </property>
    </widget>
-   <widget class="QComboBox" name="backendBox">
+   <widget class="ComboBox" name="backendBox">
     <property name="minimumSize">
      <size>
       <width>100</width>
@@ -80,10 +80,10 @@
    </widget>
    <widget class="QLabel" name="labelTarget">
     <property name="text">
-     <string>  Ä¿±ê: </string>
+     <string>  ç›®æ ‡: </string>
     </property>
    </widget>
-   <widget class="QComboBox" name="deviceBox">
+   <widget class="ComboBox" name="deviceBox">
     <property name="minimumSize">
      <size>
       <width>100</width>
@@ -108,10 +108,10 @@
    <addaction name="separator"/>
    <widget class="QLabel" name="labelInterval">
     <property name="text">
-     <string> ²ÉÑù¼ä¸ô(ms): </string>
+     <string> é‡‡æ ·é—´éš”(ms): </string>
     </property>
    </widget>
-   <widget class="QSpinBox" name="intervalSpin">
+   <widget class="SpinBox" name="intervalSpin">
     <property name="minimum">
      <number>1</number>
     </property>
@@ -128,7 +128,7 @@
      <string> TCK(MHz): </string>
     </property>
    </widget>
-   <widget class="QComboBox" name="tckBox">
+   <widget class="ComboBox" name="tckBox">
     <property name="minimumSize">
      <size>
       <width>100</width>
@@ -189,7 +189,7 @@
   </widget>
   <action name="actConn">
    <property name="text">
-    <string>Á¬½Ó</string>
+    <string>è¿æ¥</string>
    </property>
   </action>
   <action name="actDisc">
@@ -197,7 +197,7 @@
     <bool>false</bool>
    </property>
    <property name="text">
-    <string>¶Ï¿ª</string>
+    <string>æ–­å¼€</string>
    </property>
   </action>
   <action name="actStart">
@@ -205,7 +205,7 @@
     <bool>false</bool>
    </property>
    <property name="text">
-    <string>Á¬Ğø²ÉÑù</string>
+    <string>è¿ç»­é‡‡æ ·</string>
    </property>
   </action>
   <action name="actSingle">
@@ -213,12 +213,12 @@
     <bool>false</bool>
    </property>
    <property name="text">
-    <string>µ¥´Î²ÉÑù</string>
+    <string>å•æ¬¡é‡‡æ ·</string>
    </property>
   </action>
   <action name="actVar">
    <property name="text">
-    <string>±äÁ¿¡­</string>
+    <string>å˜é‡â€¦</string>
    </property>
   </action>
  </widget>
@@ -239,6 +239,16 @@
    <extends>QDockWidget</extends>
    <header>gui/monitor_dock.h</header>
    <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ComboBox</class>
+   <extends>QComboBox</extends>
+   <header>gui/combo_box.h</header>
+  </customwidget>
+  <customwidget>
+   <class>SpinBox</class>
+   <extends>QSpinBox</extends>
+   <header>gui/spin_box.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

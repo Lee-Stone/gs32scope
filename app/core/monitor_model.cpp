@@ -152,20 +152,45 @@ void MonitorModel::clear() {
 }
 
 void MonitorModel::updateLeafValue(int leafIdx, double v) {
-    if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    updateLeafValues(leafIdx, QVector<double>{v});
+}
+
+void MonitorModel::updateLeafValues(int leafIdx, const QVector<double>& values) {
+    if (leafIdx < 0 || leafIdx >= leaves_.size() || values.isEmpty()) return;
     MonitorLeaf& l = leaves_[leafIdx];
-    l.cur = v;
-    if (l.n == 0) { l.min = l.max = v; }
-    else { if (v < l.min) l.min = v; if (v > l.max) l.max = v; }
-    l.sum += v;
-    ++l.n;
+    for (double v : values) {
+        l.cur = v;
+        if (l.n == 0) { l.min = l.max = v; }
+        else { if (v < l.min) l.min = v; if (v > l.max) l.max = v; }
+        l.sum += v;
+        ++l.n;
+    }
+    emit leafValueChanged(leafIdx);
+}
+
+void MonitorModel::setLeafCurrent(int leafIdx, double v) {
+    if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    leaves_[leafIdx].cur = v;
     emit leafValueChanged(leafIdx);
 }
 
 void MonitorModel::setLeafShown(int leafIdx, bool on) {
     if (leafIdx < 0 || leafIdx >= leaves_.size()) return;
+    if (leaves_[leafIdx].shown == on) return;
     leaves_[leafIdx].shown = on;
     emit leafShownChanged(leafIdx);
+}
+
+void MonitorModel::setLeavesShown(const QVector<int>& leafIdxs, bool on) {
+    bool any = false;
+    for (int li : leafIdxs) {
+        if (li < 0 || li >= leaves_.size()) continue;
+        if (leaves_[li].shown != on) {
+            leaves_[li].shown = on;
+            any = true;
+        }
+    }
+    if (any) emit leavesShownChanged();
 }
 
 void MonitorModel::resetStats() {

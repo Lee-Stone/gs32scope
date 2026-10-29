@@ -1,51 +1,74 @@
-# GS32Scope ��Ŀ�����ض�����
+# GS32Scope 项目开发必读规则
 
-> AI �����ڿ�ʼ�κο�������ǰ�������ص�Լ�������̡�
+> AI 助手在开始任何开发操作前必须遵守的约束与流程。
 
-## 1. ����Դ�ļ���д
+## 1. 源文件编码与加密
 
-- ���ֿ�����ϵ�Դ���ļ������ܣ��� `%TSD-Header` ��ͷ����**����ֱ������ͨ��д���ߴ���**��
-- ����ͨ�� `D:\Tools\ai-read-write.exe` ��д���÷���
-  - ����`read <path>`
-  - д��`write <path> <content>`��ע�⣺���ݹ������ܳ��������г������ƣ����ļ��ֶ�д��
-  - ���ƣ�`copy <src> <dst>`���ɸ����ļ���Ŀ¼��
-- �� Read/Edit �� IDE ԭ�����߶�дʱ�������ֶ���������������˵����ǰ�����ѱ����ܹ�������͸�����У�ʵ�� AI ���߽���˫��͸��������**������������/���ģ��������� ai-read-write.exe**��
+- 本地工作区部分文件可能被终端安全软件透明加密（以 `%TSD-Header` 开头）。遇到乱码/密文时用：
+  - 读：`D:\Tools\ai-read-write.exe read <path>`
+  - 写：`D:\Tools\ai-read-write.exe write <path> <content>`（长文件分段写）
+  - 复制：`D:\Tools\ai-read-write.exe copy <src> <dst>`
+- **提交到仓库的文本必须是 UTF-8 明文**。`.ui` 的 XML 声明必须与实际编码一致：
+  GBK 字节 + `encoding="UTF-8"` 会让 `uic` 直接报
+  `Encountered incorrectly encoded content`，app 无法构建。
+- `.qrc` 引用的 `.svg`/图片也不能提交为密文，否则运行时图标是坏数据。
+- 用 Read/Edit 读到明文且正常，说明当前进程被加密过滤驱动透明放行；仍以 git 中的实际字节为准。
 
-## 2. �������̣����׶���������ϵ��
+## 2. 构建流程
 
-- **gs32link ��**�������� Makefile���� `gs32link\` ��ִ�� `mingw32-make`�������� DLL ����� `drivers\` Ŀ¼��
-- **GS32Scope Ӧ��**�������� Qt `.pro ������qmake + mingw32-make��������Ŀ¼Ϊ `build\`��Դ���� `app\`��**��Ҫ��Դ�ļ��Ž� build**����
-- recompile gs32link �󣬱��������� app �Ĺ���Ŀ¼��һ�� mingw32-make����ˢ�±����Ƶ����� DLL��
-- ����ע�⣺MinGW �� `cc1plus` ���� PATH �������� `D:\Qt\Tools\mingw1310_64\bin`����� `mingw32-make` ���� `cannot execute 'cc1plus'`���ȰѸ�Ŀ¼�ӽ� PATH��
+- **gs32link 库**：`cd gs32link; mingw32-make`
+  - 产出 `drivers\gs32link_sim.dll`、`_jlink`、`_gslink`、`_sci`、`_can`。
+  - `sci` 与 `can` 共用 `drivers/sci/sci_driver.cpp`，`can` 用 `-DGS32LINK_DRIVER_CAN` 编译。
+- **GS32Scope 应用**：qmake 主路径（源码在 `app\`，构建目录 `build-qmake\`，不要把源文件放进 build）：
+  ```powershell
+  cd build-qmake
+  qmake CONFIG+=release ..\app\GS32Scope.pro
+  mingw32-make -j4
+  windeployqt --release --compiler-runtime GS32Scope.exe
+  ```
+- `.pro` 的 post-link 会**逐个文件**复制 `drivers\*.dll` 到 `$$OUT_PWD/drivers`。
+  不要把整个 `drivers` 目录复制到已存在的 `drivers` 目标，否则会生成 `drivers\drivers` 且旧 DLL 不更新。
+- 先编 `gs32link` 再编 app；gs32link 重编后必须重跑一次 app 的 make，刷新 `build-qmake\drivers`。
+- 环境：PATH 需要完整 `D:\Qt\Tools\mingw1310_64\bin`（否则 `cc1plus` 找不到）；
+  本机也可能是 `C:\Qt\Tools\mingw1310_64\bin` 与 `C:\Qt\6.11.0\mingw_64`。
 
-## 3. DLL/EXE ͬ������ռ�ã�
+## 3. DLL/EXE 同步（防占用）
 
-- �±���� `gs32link_*.dll` ��ͬ������`drivers\`��`build\drivers\`��`build\app\drivers\` ������
-- **�� DLL ��ռ�õ��¿���ʧ�ܣ������ȹر��������е� `GS32Scope.exe` ����**�������Կ�����
-- ͬ����`build\GS32Scope.exe` ���� `build\app\` ǰҲҪȷ�� app �ѹرա�
-- �������ù�ϣУ�飨Get-FileHash SHA256��ȷ������һ�¡�
+- gs32link 输出目录是 `drivers\`；app 构建目录运行目录是 `build-qmake\`（exe 与 `drivers\` 同级）。
+- **DLL/EXE 被占用时先关闭 `GS32Scope.exe`**，再重试复制。
+- 手动同步后用哈希校验（Get-FileHash/SHA256）确认源与目标一致：
+  `drivers\gs32link_sim.dll` ↔ `build-qmake\drivers\gs32link_sim.dll`。
 
-## 4. Ӳ������Լ����RISC-V 0.13.2 / GS32��
+## 4. 硬件访问约束（RISC-V 0.13.2 / GS32）
 
-- JTAG DMI ����Update-DR ����뱣֤ 8 �� IDLE ���ڣ�1 �� IDLE + 7 ���֣�dtmcs.idle=7����
-- DM �����ж���д `dmcontrol.dmactive=1` ��**�ض� dmcontrol** �� bit0�����Ƕ� dmstatus��
-- SBA ����д sbaddress0 ������ѯ sbbusy��bit21���ٶ����ݣ���������¾�ֵ��
-- SBA ����λ��sberror[14:12] / sbbusyerror[22]���� W1C������**����дһ��**�����������������������Ч��
-- SBA ֧�������������ʵ��Ϊ׼����� debug.log �ٲ������
-  - `sbautoincrement`(bit16) + `sbreadondata`(bit15)��**֧��**��v1.15 �ض��ز�֤ʵ��
-    ͻ�������� ��3������"��֧��"�� SBDATA0 ����ַʱ�ڵ����У���
-  - ���ʿ��ȣ�8/16/32bit ֧�֣�SBCS ����λ��֤����64/128bit ��֧�֡�
-- **SBDATA0 ��ַ = 0x3C**��0x3D �� sbdata1 �� 32 λ��32 λϵͳ�� 0������ʷ���ӣ���
+- JTAG DMI 事务：Update-DR 后保证 8 个 IDLE 周期（1 进 IDLE + 7 保持，dtmcs.idle=7）。
+- DM 激活：写 `dmcontrol.dmactive=1` 后**回读 dmcontrol bit0**，不是读 dmstatus。
+- SBA 读路径：**不轮询 sbbusy**。DMI 事务（ms 级）远慢于 SBA 总线访问（ns 级），
+  下一笔 JTAG 到达时访问已完成，实测 busy 恒 0（见 `riscv_debug.cpp` 的 `sbaReadN`）。
+- SBA 写路径：写 `sbdata0` 后**轮询 sbbusy 清零**；上笔未完成时写下一笔会置粘滞 `sbbusyerror`。
+- SBA 出错位（sberror[14:12] / sbbusyerror[22]）是 W1C，必须**独立写一笔**清除，不能混在配置字里。
+- 突发读：`sbautoincrement`(bit16) + `sbreadondata`(bit15) 已实测支持；
+  末次读有“段末+1 越界读”副作用，批末追加 R SBCS + NOP 检查 sberror，出错则 W1C + 回退慢路径。
+- 访问宽度：8/16/32bit 支持，64/128bit 不支持。
+- **SBDATA0 地址 = 0x3C**（0x3D 是 sbdata1 高 32 位，32 位系统恒 0）。
+- 涉及硬件行为的修改必须提醒实机验证；本仓库没有真实 ELF/硬件时用 `.zcode` 的样例与模拟器先回归。
 
-## 5. IDE ���������˷���
+## 5. IDE 缓冲区回退风险
 
-- IDE ��ż���԰� `gslink_driver.cpp`��`mainwindow.cpp` ���ļ����˵��ɰ汾����ʷ���ѷ�����Σ���
-- **��Ҫ�޸ĺ����ض��ļ�ȷ����������**�����������Ϊ�쳣�����Ȼ����ļ��� IDE ���ˡ�
-- �����û��ر�/�ؿ���ر�ǩҳ���ҹر�ʱ�����档
+- IDE 偶发把 `gslink_driver.cpp`、`mainwindow.cpp` 等文件回退到旧版本（历史上发生过多次）。
+- 重要修改后回读文件确认内容仍在；编译后行为异常优先怀疑文件被 IDE 回退。
+- 建议关闭/重开相关标签页，且关闭时不保存。
 
-## 6. ����ǰ�Բ�
+## 6. 交付前自查
 
-- ���� gs32link�����±��� �� ͬ������ DLL���� ��3���� ȷ�Ϲ�ϣһ�¡�
-- ���� app��`build\GS32Scope.exe` ���� `build\app\`��app �ر�״̬���� ��ϣһ�¡�
-- �漰Ӳ����Ϊ���޸ģ������û�ʵ�⣨���� �� �� `[init]` ��־ �� ���� �� ������/���Σ���
-
+1. `gs32link` 全量重编，5 个 DLL 都在 `drivers\`。
+2. app 重编（qmake + mingw32-make），`build-qmake\drivers\*.dll` 与源哈希一致。
+3. 启动：
+   - `GS32Scope.exe --demo`：Simulation 自动连接、电机面板出数、滑块/开关写入有回读。
+   - `GS32Scope.exe --demo --import .zcode\sample_motor.elf`：`g_motor` 结构体成员出数。
+   - `GS32Scope.exe --demo --import .zcode\sample_motor.svd`：`MOTOR.CTRL.EN` 随开关写入变化。
+4. SCI/CAN：
+   - `python .zcode\sci_target_sim.py 7000` + `GS32SCOPE_BACKEND=sci` / `GS32SCOPE_SCI_CONFIG=tcp:127.0.0.1:7000`。
+   - 7001 端口 + `GS32SCOPE_BACKEND=can` 验证 CAN-GW。
+5. CSV：`Ctrl+Shift+E` 或 `GS32SCOPE_CSV=<path>`，检查 `time_s,channel,value` 行数。
+6. 确认没有新的 `crash.log`；关键 UI 用截图/脚本复核。

@@ -334,7 +334,6 @@ bool parseInfo(Ctx& c, QString* err) {
             const QByteArray* ad = sec(c, ".debug_abbrev");
             Rd ar(reinterpret_cast<const uint8_t*>(ad->constData()) + abbrevOff,
                   ad->size() - int(abbrevOff));
-            int dbgN = 0;
             while (!ar.eof()) {
                 const uint64_t code = ar.uleb();
                 if (code == 0) break;   /* 表终止符(段内可能有多张表, 只取本表) */
@@ -569,8 +568,11 @@ VariableDef::Type mapType(const CType* t) {
     if (t->kind == CType::Base) {
         const QString& n = t->name;
         if (n == "float")  return VariableDef::Float;
-        if (n == "double") return VariableDef::Float;
+        if (n == "double" || n == "long double") return VariableDef::Double;
         if (n == "bool" || n == "_Bool") return VariableDef::Uint8;
+        /* 64 位整型必须先于 "long int" 判断(RV32 的 long 仍是 32 位) */
+        if (n.contains("unsigned long long")) return VariableDef::Uint64;
+        if (n.contains("long long")) return VariableDef::Int64;
         if (n.contains("unsigned char")) return VariableDef::Uint8;
         if (n.contains("signed char") || n == "char") return VariableDef::Int8;
         if (n == "short" || n == "short int" || n == "signed short") return VariableDef::Int16;

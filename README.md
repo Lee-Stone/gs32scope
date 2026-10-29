@@ -1,92 +1,172 @@
 # GS32Scope
 
+面向 GS32（RISC-V DSP）的嵌入式在线变量示波器 / 上位机。通过 JTAG、SCI 或 CAN 网关周期读取目标 RAM 变量与外设寄存器，实时绘图、统计、修改变量，并提供可自定义的电机控制仪表盘。
 
+对标工具：SEGGER J-Scope、STM32CubeMonitor、NXP FreeMASTER。
 
-## Getting started
+## 功能
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- **变量监控**：ELF/DWARF（首选）或 `.symtab` 兜底导入全局变量，支持嵌套结构体、数组、位域、枚举类型名、按源文件分组。
+- **寄存器监控**：CMSIS-SVD 导入，外设 → 寄存器 → 位域三级树；外设整块监控会按寄存器跨度读取。
+- **高频采样**：POLL 模式 1 ms–10 s，deadline 调度 + 高精度 waitable timer；单次采样模式。
+- **实时波形**：统一坐标系、暗色示波器风格、X/Y 网格、30 fps 重绘、X 轴自动跟随、60 s 历史缓冲、加入通道自动回放历史、CSV 导出。
+- **实时统计**：左下绘制列表实时显示当前值 / 最大 / 最小 / 平均，颜色列居中。
+- **变量写入**：监控栏双击当前值、仪表盘滑块/开关/数值编辑均可写入；位域走读-改-写；写入后立即回读校验。
+- **自定义仪表盘**：数值 / 圆形仪表 / 滑块 / 开关 / 数值编辑五类组件，统一尺寸（按窗口均分铺满网格，默认约 287×180）；拖动自动吸附到单元网格并禁止重叠；QSettings 自动持久化。
+- **电机控制演示**：一键生成转速/电流仪表、目标转速滑块与目标转速数值编辑、使能开关、温度数值编辑面板。
+- **波形增删**：监控栏顶部「加入波形 / 移出波形」按钮、波形列勾选、左下绘制列表右键「添加波形变量…」、变量对话框「波形」列四种入口。
+- **主题**：`主题` 菜单可切换浅色 / 深色 / 跟随系统；下拉框统一向下展开，顶部菜单/工具栏按钮、下拉箭头和 SpinBox 上下按钮都有明确样式。
+- **多通讯后端**：Simulation、SCI（串口/TCP 测试）、CAN 网关（TCP/CAN-Ethernet 桥）、J-Link、GS32-Link（FTDI MPSSE + JTAG + RISC-V SBA）。
+- **CSV 导出**：`time_s,channel,value` 长表，UTF-8 BOM，Excel 可直接打开。
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+## 目录
 
 ```
-cd existing_repo
-git remote add origin http://4d8faa959e1d/zhaolei/gs32scope.git
-git branch -M main
-git push -uf origin main
+app/                 Qt 6 上位机
+  core/              采样引擎、监控模型、值编解码、写入器
+  gui/               主窗口、波形、仪表盘、变量对话框、监控树、绘制列表
+  symbols/           DWARF / ELF / SVD 解析
+  link/              gs32link ABI 的 QLibrary 封装
+gs32link/            独立通讯 DLL（纯 C ABI）
+  drivers/sim/       模拟器（含电机演示信号与写入回读）
+  drivers/jlink/     SEGGER JLinkARM.dll
+  drivers/gslink/    FTDI FT2232H + MPSSE + JTAG + RISC-V Debug 0.13.2 SBA
+  drivers/sci/       SCI 串口 / CAN 网关（同帧协议，TCP 测试传输）
+tests/               解析器/模型控制台测试
+third_party/         QCustomPlot 2.1.1 (GPLv3)
+.zcode/              需求文档、样例 ELF/SVD、SCI 目标模拟器、UI 测试脚本
+REQUIREMENTS.md      原始需求与硬件踩坑记录
 ```
 
-## Integrate with your tools
+## 构建
 
-- [ ] [Set up project integrations](http://4d8faa959e1d/zhaolei/gs32scope/-/settings/integrations)
+依赖：Windows x64、Qt 6.8.3+（已验证 6.11.0）、MinGW 13.1、`mingw32-make`。
 
-## Collaborate with your team
+```powershell
+# 1) 通讯库（输出 drivers\gs32link_*.dll）
+cd gs32link
+mingw32-make
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+# 2) 上位机（shadow build）
+mkdir build
+cd build
+qmake CONFIG+=release ..\app\GS32Scope.pro
+mingw32-make -j4
 
-## Test and Deploy
+# 3) 部署 Qt 运行库（绿色包）
+windeployqt --release --compiler-runtime GS32Scope.exe
+```
 
-Use the built-in continuous integration in GitLab.
+- `.pro` 的 post-link 会把 `drivers\` 里的 DLL 逐个复制到构建目录/`drivers`。
+- 先编 `gs32link` 再编 app；若驱动力被占用，先关闭 `GS32Scope.exe`。
+- CMake 工程也保留，qmake 是主构建路径。
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+## 运行
 
-***
+### 一键仿真演示
 
-# Editing this README
+```powershell
+GS32Scope.exe --demo
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+自动连接 Simulation、加载 `sim.speed/current/target/enable/temp`、生成电机控制仪表盘并开始 50 Hz 采样。可以直接拖目标转速滑块、点使能开关验证写入。
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### 导入真实 ELF / SVD
 
-## Name
-Choose a self-explaining name for your project.
+```powershell
+GS32Scope.exe --import firmware.elf
+GS32Scope.exe --import chip.svd
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+`--import` 会静默导入并监控全部顶层变量/外设。也可以在界面点「变量…」手动导入和勾选。
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### SCI（串口）
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+1. 「通讯接口」选择 `SCI`，点「连接」。
+2. 输入 `COM3@115200`（串口）或 `tcp:127.0.0.1:7000`（测试）。
+3. 目标固件需实现下方帧协议。
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+本机无硬件时可先用目标模拟器：
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```powershell
+python .zcode\sci_target_sim.py 7000
+$env:GS32SCOPE_BACKEND='sci'
+$env:GS32SCOPE_SCI_CONFIG='tcp:127.0.0.1:7000'
+GS32Scope.exe --demo
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### CAN 网关
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+`CAN-GW` 后端面向 CAN↔Ethernet/串口网关：网关把 CAN 帧还原成与 SCI 相同的字节流。默认 TCP `7001`：
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+```powershell
+python .zcode\sci_target_sim.py 7001
+$env:GS32SCOPE_BACKEND='can'
+$env:GS32SCOPE_SCI_CONFIG='tcp:127.0.0.1:7001'
+GS32Scope.exe --demo
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+真实 USB-CAN 适配器需要提供等价网关固件；`gs32link_can.dll` 本身不直接驱动 PCAN/Vector 硬件。
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+### JTAG
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+- `GS32-Link`：自研 FTDI FT2232H + MPSSE + JTAG + RISC-V SBA，目标 `RV32`，接口 `jtag`。
+- `JLink`：运行时加载 `JLinkARM.dll`，目标 `RV32`（内部 `riscv32`），接口 `swd`。
 
-## License
-For open source projects, say how it is licensed.
+## 使用要点
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- **监控集 / 显示集独立**：变量对话框节点勾选 = 监控；「波形」列 = 进波形。
+- **波形增删**：在右侧监控栏选中变量/结构体，点顶部「加入波形 / 移出波形」；也可直接勾选「波形」列，或在左下绘制列表右键「添加波形变量…」。
+- **写变量**：监控栏双击当前值；仪表盘滑块松开、开关点击、数值编辑输入后点「写入」；状态栏显示回读值。
+- **仪表盘**：`添加组件` 选择数值/仪表/滑块/开关/数值编辑并绑定变量；所有组件统一尺寸、按单元网格均分铺满且不会重叠；右键绑定/移除。
+- **主题**：菜单栏 `主题 → 浅色 / 深色 / 跟随系统`，选择自动记忆；跟随系统会随 Windows 深浅色变化实时切换。
+- **CSV**：`数据 → 导出 CSV` 或 `Ctrl+Shift+E`；`Ctrl+Shift+L` 清空波形。
+- **会话恢复**：工具栏参数、导入文件、监控/绘制勾选、仪表盘布局退出自动保存到 `%APPDATA%\GS32\GS32Scope.ini`。
+
+## SCI / CAN 网关帧协议
+
+小端：
+
+```
+Request : A5 5A | cmd | seq | addr(4) | len(2) | payload(len) | crc16(2)
+Response: 5A A5 | cmd | seq | status | len(2) | payload(len) | crc16(2)
+
+cmd    0x01 read   (payload 为空, len = 要读字节数)
+       0x02 write  (payload = 数据, len = 字节数)
+crc16  CCITT-FALSE, poly 0x1021, init 0xFFFF,
+       覆盖 cmd..payload(请求含 addr/len, 响应含 status/len)
+status 0=OK, 1=CRC, 2=参数, 3=未知命令
+```
+
+单帧 payload 上限 256 字节，驱动自动分块。参考实现：`gs32link/drivers/sci/sci_driver.cpp` 与 `.zcode/sci_target_sim.py`。
+
+## 测试与样例
+
+- `tests/`：ELF、DWARF、MonitorModel 控制台测试（CMake 构建）。
+- `.zcode/sample_motor.elf`：最小 DWARF4 结构体样例（`g_motor` @ `0x20100000`）。
+- `.zcode/sample_motor.svd`：`MOTOR` 外设 + 寄存器/位域样例。
+- `.zcode/sci_target_sim.py`：SCI/CAN 网关目标模拟器（TCP）。
+- `.zcode/ui_test.ps1` / `capture_printwindow.ps1`：窗口点击/拖动/截图辅助脚本。
+
+样例验证：
+
+```powershell
+GS32Scope.exe --demo --import .zcode\sample_motor.elf
+GS32Scope.exe --demo --import .zcode\sample_motor.svd
+```
+
+## 已知限制
+
+- STREAM（硬件定时流）仅有 ABI 定义，各后端返回 `GS32_ERR_NOT_IMPL`。
+- OpenOCD 后端未实现；新增后端按 `gs32link.h` 实现即可。
+- CAN 目前是网关路径，不直接驱动 USB-CAN 适配器。
+- `.gsr` 录制/回放、游标/边沿搜索、FFT、多分屏仍属后续规划。
+- QCustomPlot 2.1.1 为 GPLv3；对外分发前请确认许可策略。
+- 详细硬件约束（SBA 地址、TAP 时序、批量聚合等）见 `REQUIREMENTS.md`。
+
+## 相关文档
+
+- `.zcode/GS32Scope.md`：产品能力清单
+- `.zcode/竞品分析.md`：竞品参考
+- `REQUIREMENTS.md`：原始需求、架构与硬件踩坑记录
+- `begin.rule`：开发/构建/硬件操作约束

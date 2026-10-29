@@ -1,5 +1,6 @@
 #include "gui/mainwindow.h"
 #include <QApplication>
+#include <QMetaObject>
 #include <QSettings>
 #include <cstdio>
 
@@ -40,5 +41,8 @@ int main(int argc, char* argv[]) {
 
     MainWindow w;
     w.show();
+    /* --demo: 自动连接 Simulation、加载演示变量、生成电机面板并开始采样 */
+    if (QApplication::arguments().contains(QStringLiteral("--demo")))
+        QMetaObject::invokeMethod(&w, "onSimDemo", Qt::QueuedConnection);
     return app.exec();
 }

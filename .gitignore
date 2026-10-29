@@ -1,6 +1,8 @@
 # Build
 build/
 build-*/
+/drivers/
+*.dll
 out/
 *.o
 *.obj
@@ -11,5 +13,6 @@ out/
 
 # IDE
 .vscode/
+.zcode/
 .idea/
 *.user

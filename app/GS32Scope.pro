@@ -1,10 +1,13 @@
-# GS32Scope ÉÏÎ»»ú (qmake, Qt 6.8.3)
-# ÓÃ·¨: ÔÚ±¾Ä¿Â¼Ö´ĞĞ qmake GS32Scope.pro && mingw32-make release
+# GS32Scope ä¸Šä½æœº (qmake, Qt 6.8.3)
+# ç”¨æ³•: åœ¨æœ¬ç›®å½•æ‰§è¡Œ qmake GS32Scope.pro && mingw32-make release
 
 QT += core gui widgets printsupport
 CONFIG += c++17
 TEMPLATE = app
 TARGET = GS32Scope
+
+# gs32link.h çš„ interface å­—æ®µä¸ windows.h å®å†²çª; éœ€æ±‚æ–‡æ¡£è¦æ±‚è¿™å››ä¸ªå®
+DEFINES += UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
 
 QCUSTOMPLOT_DIR = $$PWD/../third_party/qcustomplot/qcustomplot-source
 
@@ -16,11 +19,14 @@ SOURCES += \
     main.cpp \
     core/sample_engine.cpp \
     core/monitor_model.cpp \
+    core/variable_writer.cpp \
     gui/mainwindow.cpp \
     gui/plot_widget.cpp \
+    gui/dashboard_widget.cpp \
     gui/variable_dialog.cpp \
     gui/monitor_dock.cpp \
     gui/display_list.cpp \
+    gui/write_dialog.cpp \
     symbols/elf_parser.cpp \
     symbols/svd_parser.cpp \
     symbols/dwarf_parser.cpp \
@@ -28,13 +34,19 @@ SOURCES += \
 
 HEADERS += \
     core/variable_def.h \
+    core/value_codec.h \
     core/sample_engine.h \
     core/monitor_model.h \
+    core/variable_writer.h \
     gui/mainwindow.h \
+    gui/combo_box.h \
+    gui/spin_box.h \
     gui/plot_widget.h \
+    gui/dashboard_widget.h \
     gui/variable_dialog.h \
     gui/monitor_dock.h \
     gui/display_list.h \
+    gui/write_dialog.h \
     gui/symbol_item.h \
     link/link_driver.h \
     symbols/elf_parser.h \
@@ -46,14 +58,21 @@ RESOURCES += resources/app.qrc
 
 FORMS += gui/mainwindow.ui
 
-# timeBeginPeriod/timeEndPeriod (²ÉÑù¶¨Ê±¾«¶È)
+# timeBeginPeriod/timeEndPeriod (é‡‡æ ·å®šæ—¶ç²¾åº¦)
 win32:LIBS += -lwinmm
 
-# ¹¹½¨ºó¸´ÖÆÇı¶¯ DLL µ½¿ÉÖ´ĞĞÎÄ¼şÄ¿Â¼ (¿ª·¢Ê±Ö±½Ó´Ó¹¹½¨Ä¿Â¼Ö´ĞĞ)
+# æ„å»ºåå¤åˆ¶é©±åŠ¨ DLL åˆ°å¯æ‰§è¡Œæ–‡ä»¶ç›®å½• (å¼€å‘æ—¶ç›´æ¥ä»æ„å»ºç›®å½•æ‰§è¡Œ)
+# æ³¨æ„: ä¸èƒ½æŠŠæ•´ä¸ª drivers ç›®å½•å¤åˆ¶åˆ°å·²æœ‰ drivers ç›®æ ‡(ä¼šç”Ÿæˆ drivers/drivers ä¸”æ—§ DLL ä¸æ›´æ–°),
+# è¿™é‡Œå…ˆå»ºç›®å½•å†é€æ–‡ä»¶è¦†ç›–ã€‚
 win32 {
     DESTDIR = $$OUT_PWD
-    QMAKE_POST_LINK += $$QMAKE_COPY_DIR $$shell_path($$PWD/../drivers) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(MKDIR) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_sim.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_jlink.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_gslink.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_sci.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_can.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
 }
 
-# shadow build: Ô´ÂëÄ¿Â¼±£³Ö¸É¾», ¹¹½¨²úÎïÔÚ build/
-# Ä¬ÈÏ OUT_PWD ¼´ qmake ÔËĞĞÄ¿Â¼
+# shadow build: æºç ç›®å½•ä¿æŒå¹²å‡€, æ„å»ºäº§ç‰©åœ¨ build/
+# é»˜è®¤ OUT_PWD å³ qmake è¿è¡Œç›®å½•

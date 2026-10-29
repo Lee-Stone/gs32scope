@@ -1,28 +1,66 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "core/variable_writer.h"
+#include "gui/dashboard_widget.h"
+#include "gui/write_dialog.h"
 #include "variable_dialog.h"
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDockWidget>
+#include <QFileDialog>
+#include <QGuiApplication>
 #include <QHash>
+#include <QInputDialog>
+#include <QKeySequence>
 #include <QSettings>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QPalette>
 #include <QSplitter>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyleFactory>
+#include <QStyleHints>
+#include <QTabWidget>
 #include <QToolBar>
+#include <algorithm>
 #include <functional>
+
+namespace {
+/* "tcp:127.0.0.1:7000" / "COM3@115200" / 原始 JSON -> 驱动 extra JSON */
+QByteArray sciConfigToJson(const QString& text) {
+    const QString t = text.trimmed();
+    if (t.startsWith('{')) return t.toUtf8();
+    if (t.startsWith("tcp:", Qt::CaseInsensitive)) {
+        const QString hp = t.mid(4).trimmed();
+        const int colon = hp.lastIndexOf(':');
+        const QString host = colon > 0 ? hp.left(colon) : QStringLiteral("127.0.0.1");
+        int port = colon > 0 ? hp.mid(colon + 1).toInt() : 7000;
+        if (port <= 0) port = 7000;
+        return QString("{\"transport\":\"tcp\",\"host\":\"%1\",\"port\":%2}")
+            .arg(host).arg(port).toUtf8();
+    }
+    QString com = t, baud = QStringLiteral("115200");
+    const int at = t.indexOf('@');
+    if (at > 0) { com = t.left(at).trimmed(); baud = t.mid(at + 1).trimmed(); }
+    bool ok = false;
+    const int b = baud.toInt(&ok);
+    return QString("{\"transport\":\"serial\",\"com\":\"%1\",\"baud\":%2}")
+        .arg(com).arg(ok && b > 0 ? b : 115200).toUtf8();
+}
+} // namespace
 
 MainWindow::MainWindow() {
     ui = new Ui::MainWindow;
     ui->setupUi(this);
-    applyLightTheme();
 
     model_ = new MonitorModel(this);
     engine_ = new SampleEngine();
@@ -43,6 +81,10 @@ MainWindow::MainWindow() {
     connect(model_, &MonitorModel::changed, this, &MainWindow::onModelChanged);
     connect(model_, &MonitorModel::leafShownChanged,
             this, &MainWindow::onLeafShownChanged);
+    connect(model_, &MonitorModel::leavesShownChanged, this, [this] {
+        dispList_->rebuild();
+        syncPlotChannels();
+    });
 
     /* 变量选择对话框 -> 模型 */
     varDialog_ = new VariableDialog(this);
@@ -69,6 +111,34 @@ MainWindow::MainWindow() {
         const int ti = ui->tckBox->findText(s.value("toolbar/tck").toString());
         if (ti >= 0) ui->tckBox->setCurrentIndex(ti);
         varDialog_->restoreState(s);
+        dashboard_->restoreState(s);
+        themeMode_ = s.value("appearance/theme", "system").toString();
+        applyTheme(themeMode_);
+    }
+
+    /* 跟随系统: Windows 深浅色切换时实时重刷 */
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
+            this, [this](Qt::ColorScheme) {
+        if (themeMode_ == "system") applyTheme("system");
+    });
+
+    /* --import <elf|svd>: 启动时静默导入并监控全部顶层变量/外设 */
+    {
+        const QStringList args = QApplication::arguments();
+        const int ii = args.indexOf("--import");
+        if (ii >= 0 && ii + 1 < args.size()) {
+            const QString path = args[ii + 1];
+            const bool isSvd = path.endsWith(".svd", Qt::CaseInsensitive) ||
+                               path.endsWith(".xml", Qt::CaseInsensitive);
+            const bool ok = isSvd ? varDialog_->importSvd(path)
+                                  : varDialog_->importElf(path);
+            if (ok) {
+                varDialog_->monitorAll();
+                setStatus("已导入并监控: " + path);
+            } else {
+                setStatus("导入失败: " + path, true);
+            }
+        }
     }
 
     /* 监控栏右键 -> 对话框 */
@@ -76,68 +146,183 @@ MainWindow::MainWindow() {
             this, &MainWindow::onOpenVariableDialog);
     connect(monDock_, &MonitorDock::removeRootRequested,
             this, &MainWindow::onRemoveRoot);
+    connect(monDock_, &MonitorDock::writeRequested,
+            this, &MainWindow::onWriteLeaf);
 
-    /* 绘制列表 -> 波形垂直参数 */
-    connect(dispList_, &DisplayList::channelParamChanged,
-            this, [this](const QString& path, double div, double offset, bool autoMode) {
-        plot_->setChannelDivOffset(path, div, offset, autoMode);
-    });
+    /* 绘制列表 -> 添加波形变量 */
+    connect(dispList_, &DisplayList::addVariableRequested,
+            this, &MainWindow::onOpenVariableDialog);
 
     uiTimer_.setInterval(100);
     connect(&uiTimer_, &QTimer::timeout, this, &MainWindow::onUiTick);
     uiTimer_.start();
 
+    plotTimer_.setInterval(33);   /* 30fps: 绘图与批次/采样率解耦 */
+    connect(&plotTimer_, &QTimer::timeout, this, [this] {
+        if (plot_->hasData()) plot_->replot();
+    });
+    plotTimer_.start();
+
     setStatus("就绪 - 选择后端并连接; 点「变量…」选择监控变量");
 }
 
-/* ---------------- UI ---------------- */
-/* 浅色主题: 除波形区(PlotWidget 独立暗色)外, 全部白/浅灰底 + 深色文字 */
-void MainWindow::applyLightTheme() {
+/* ---------------- UI / 主题 ---------------- */
+namespace {
+QString makeStyleSheet(bool dark) {
+    const QString bg      = dark ? "#1e2228" : "#f3f4f6";
+    const QString panel   = dark ? "#23272e" : "#ffffff";
+    const QString panel2  = dark ? "#2a2f37" : "#f3f4f6";
+    const QString text    = dark ? "#e6e9ee" : "#1f2328";
+    const QString muted   = dark ? "#aeb7c4" : "#57606a";
+    const QString border  = dark ? "#3a404a" : "#d8dbe0";
+    const QString border2 = dark ? "#4a5260" : "#c9ced6";
+    const QString disabled= dark ? "#6b7482" : "#9aa0a6";
+    const QString btn     = dark ? "#2c313a" : "#ffffff";
+    const QString btnHover= dark ? "#3a4250" : "#e6e8eb";
+    const QString spinBtn = dark ? "#343a45" : "#eef1f5";
+    const QString sel     = dark ? "#2f4a7a" : "#cfe3ff";
+    const QString selText = dark ? "#dbeafe" : "#0b57d0";
+    const QString arrowUp   = dark ? ":/icons/arrow_up_light.svg" : ":/icons/arrow_up.svg";
+    const QString arrowDown = dark ? ":/icons/arrow_down_light.svg" : ":/icons/arrow_down.svg";
+
+    QString q;
+    q += "QMenuBar{background:" + bg + ";color:" + text + ";border-bottom:1px solid " + border + ";}";
+    q += "QMenuBar::item{padding:5px 14px;background:transparent;border-radius:4px;}";
+    q += "QMenuBar::item:selected{background:" + sel + ";color:" + selText + ";}";
+    q += "QMenu{background:" + panel + ";color:" + text + ";border:1px solid " + border2 + ";}";
+    q += "QMenu::item{padding:6px 26px;}";
+    q += "QMenu::item:selected{background:" + sel + ";color:" + selText + ";}";
+    q += "QMenu::separator{height:1px;background:" + border + ";margin:4px 8px;}";
+    q += "QToolBar{background:" + bg + ";border-bottom:1px solid " + border + ";spacing:6px;padding:3px;}";
+    q += "QToolButton{background:" + btn + ";color:" + text + ";border:1px solid " + border2 +
+         ";border-radius:4px;padding:4px 10px;}";
+    q += "QToolButton:hover{background:" + sel + ";border-color:#5b8def;}";
+    q += "QToolButton:pressed{background:" + sel + ";}";
+    q += "QToolButton:disabled{background:" + bg + ";color:" + disabled + ";border-color:" + border + ";}";
+    q += "QToolButton::menu-indicator{image:url(" + arrowDown +
+         ");width:9px;height:9px;subcontrol-origin:padding;subcontrol-position:right center;right:3px;}";
+    q += "QComboBox,QSpinBox,QLineEdit{background:" + panel + ";color:" + text + ";border:1px solid " +
+         border2 + ";border-radius:4px;padding:3px 8px;min-height:22px;}";
+    q += "QComboBox{padding-right:24px;}";
+    q += "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:24px;"
+         "background:" + spinBtn + ";border-left:1px solid " + border2 +
+         ";border-top-right-radius:4px;border-bottom-right-radius:4px;}";
+    q += "QComboBox::down-arrow{image:url(" + arrowDown + ");width:12px;height:12px;}";
+    q += "QSpinBox{padding-right:24px;}";
+    q += "QSpinBox::up-button{subcontrol-origin:border;subcontrol-position:top right;width:22px;"
+         "height:50%;background:" + spinBtn + ";border-left:1px solid " + border2 +
+         ";border-top-right-radius:4px;}";
+    q += "QSpinBox::down-button{subcontrol-origin:border;subcontrol-position:bottom right;width:22px;"
+         "height:50%;background:" + spinBtn + ";border-left:1px solid " + border2 +
+         ";border-bottom-right-radius:4px;}";
+    q += "QSpinBox::up-arrow{image:url(" + arrowUp + ");width:10px;height:10px;}";
+    q += "QSpinBox::down-arrow{image:url(" + arrowDown + ");width:10px;height:10px;}";
+    q += "QToolButton#spinUp,QToolButton#spinDown{background:" + spinBtn + ";color:" + text +
+         ";border:1px solid " + border2 + ";border-radius:3px;padding:0;"
+         "font-weight:700;font-size:10px;}";
+    q += "QToolButton#spinUp:hover,QToolButton#spinDown:hover{background:" + sel + ";}";
+    q += "QComboBox:disabled,QSpinBox:disabled,QLineEdit:disabled{color:" + disabled + ";}";
+    q += "QTreeWidget,QTableWidget,QListWidget,QTableView{background:" + panel + ";color:" + text +
+         ";border:none;font-size:13px;gridline-color:" + border + ";}";
+    q += "QTreeWidget::item:selected,QTableWidget::item:selected,QListWidget::item:selected{background:" +
+         sel + ";color:" + selText + ";}";
+    q += "QHeaderView::section{background:" + panel2 + ";color:" + muted +
+         ";border:none;border-right:1px solid " + border + ";padding:4px 6px;}";
+    q += "QTableCornerButton::section{background:" + panel2 + ";border:none;}";
+    q += "QTreeWidget::indicator,QListWidget::indicator{width:14px;height:14px;}";
+    q += "QTreeWidget::indicator:unchecked{border:1px solid " + border2 +
+         ";border-radius:3px;background:" + panel + ";}";
+    q += "QTreeWidget::indicator:checked{border:1px solid #4d8dff;border-radius:3px;"
+         "background:#0a6cff;image:url(:/icons/check.svg);}";
+    q += "QPushButton{background:" + btn + ";color:" + text + ";border:1px solid " + border2 +
+         ";border-radius:4px;padding:4px 14px;}";
+    q += "QPushButton:hover{background:" + btnHover + ";}";
+    q += "QPushButton:disabled{color:" + disabled + ";background:" + bg + ";border-color:" + border + ";}";
+    q += "QDockWidget{color:" + text + ";}";
+    q += "QDockWidget::title{background:" + panel2 + ";color:" + muted + ";padding:5px;}";
+    q += "QTabWidget::pane{border:1px solid " + border + ";background:" + panel + ";}";
+    q += "QTabBar::tab{background:" + btn + ";color:" + text + ";border:1px solid " + border2 +
+         ";border-bottom:none;padding:5px 16px;margin-right:2px;"
+         "border-top-left-radius:4px;border-top-right-radius:4px;}";
+    q += "QTabBar::tab:selected{background:" + panel + ";color:#2f7bff;font-weight:600;}";
+    q += "QTabBar::tab:hover{background:" + sel + ";}";
+    q += "QSplitter::handle{background:" + border + ";}";
+    q += "QStatusBar{background:" + bg + ";color:" + muted + ";}";
+    q += "QToolTip{background:" + panel + ";color:" + text + ";border:1px solid " + border2 + ";}";
+    q += "QComboBox QAbstractItemView{background:" + panel + ";color:" + text + ";border:1px solid " +
+         border2 + ";selection-background-color:" + sel + ";selection-color:" + selText + ";}";
+    return q;
+}
+} // namespace
+
+bool MainWindow::systemPrefersDark() const {
+    const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
+    if (scheme == Qt::ColorScheme::Dark) return true;
+    if (scheme == Qt::ColorScheme::Light) return false;
+    QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                  QSettings::NativeFormat);
+    return reg.value(QStringLiteral("AppsUseLightTheme"), 1).toInt() == 0;
+}
+
+void MainWindow::applyTheme(const QString& mode) {
+    themeMode_ = (mode == "light" || mode == "dark") ? mode : QStringLiteral("system");
+    const bool dark = themeMode_ == "dark" ||
+                      (themeMode_ == "system" && systemPrefersDark());
+
     QApplication::setStyle(QStyleFactory::create("Fusion"));
     QPalette p;
-    const QColor window(0xF3, 0xF4, 0xF6), base(0xFF, 0xFF, 0xFF),
-        text(0x1F, 0x23, 0x28), hl(0x0A, 0x6C, 0xFF), btn(0xE6, 0xE8, 0xEB);
-    p.setColor(QPalette::Window, window);
-    p.setColor(QPalette::WindowText, text);
-    p.setColor(QPalette::Base, base);
-    p.setColor(QPalette::AlternateBase, window);
-    p.setColor(QPalette::Text, text);
-    p.setColor(QPalette::Button, btn);
-    p.setColor(QPalette::ButtonText, text);
-    p.setColor(QPalette::Highlight, hl);
-    p.setColor(QPalette::HighlightedText, Qt::white);
-    p.setColor(QPalette::ToolTipBase, base);
-    p.setColor(QPalette::ToolTipText, text);
-    p.setColor(QPalette::PlaceholderText, QColor(0x9A, 0xA0, 0xA6));
-    p.setColor(QPalette::Disabled, QPalette::Text, QColor(0x8B, 0x94, 0x9E));
-    p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x8B, 0x94, 0x9E));
+    if (dark) {
+        p.setColor(QPalette::Window, QColor("#1e2228"));
+        p.setColor(QPalette::WindowText, QColor("#e6e9ee"));
+        p.setColor(QPalette::Base, QColor("#23272e"));
+        p.setColor(QPalette::AlternateBase, QColor("#262b33"));
+        p.setColor(QPalette::Text, QColor("#e6e9ee"));
+        p.setColor(QPalette::Button, QColor("#2c313a"));
+        p.setColor(QPalette::ButtonText, QColor("#e6e9ee"));
+        p.setColor(QPalette::Highlight, QColor("#2f4a7a"));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::ToolTipBase, QColor("#23272e"));
+        p.setColor(QPalette::ToolTipText, QColor("#e6e9ee"));
+        p.setColor(QPalette::PlaceholderText, QColor("#8a94a6"));
+        p.setColor(QPalette::Mid, QColor("#3a404a"));
+        p.setColor(QPalette::Midlight, QColor("#343a45"));
+        p.setColor(QPalette::Light, QColor("#4a5260"));
+        p.setColor(QPalette::Dark, QColor("#15181d"));
+        p.setColor(QPalette::Disabled, QPalette::Text, QColor("#6b7482"));
+        p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#6b7482"));
+        p.setColor(QPalette::Disabled, QPalette::WindowText, QColor("#6b7482"));
+    } else {
+        p.setColor(QPalette::Window, QColor(0xF3, 0xF4, 0xF6));
+        p.setColor(QPalette::WindowText, QColor(0x1F, 0x23, 0x28));
+        p.setColor(QPalette::Base, QColor(0xFF, 0xFF, 0xFF));
+        p.setColor(QPalette::AlternateBase, QColor(0xF3, 0xF4, 0xF6));
+        p.setColor(QPalette::Text, QColor(0x1F, 0x23, 0x28));
+        p.setColor(QPalette::Button, QColor(0xE6, 0xE8, 0xEB));
+        p.setColor(QPalette::ButtonText, QColor(0x1F, 0x23, 0x28));
+        p.setColor(QPalette::Highlight, QColor(0x0A, 0x6C, 0xFF));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::ToolTipBase, QColor(0xFF, 0xFF, 0xFF));
+        p.setColor(QPalette::ToolTipText, QColor(0x1F, 0x23, 0x28));
+        p.setColor(QPalette::PlaceholderText, QColor(0x9A, 0xA0, 0xA6));
+        p.setColor(QPalette::Mid, QColor(0xD8, 0xDB, 0xE0));
+        p.setColor(QPalette::Midlight, QColor(0xE5, 0xE7, 0xEB));
+        p.setColor(QPalette::Light, QColor(0xFF, 0xFF, 0xFF));
+        p.setColor(QPalette::Dark, QColor(0xC9, 0xCE, 0xD6));
+        p.setColor(QPalette::Disabled, QPalette::Text, QColor(0x8B, 0x94, 0x9E));
+        p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x8B, 0x94, 0x9E));
+        p.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x8B, 0x94, 0x9E));
+    }
     QApplication::setPalette(p);
-    setStyleSheet(
-        "QToolBar{background:#f3f4f6;border-bottom:1px solid #d8dbe0;spacing:6px;}"
-        "QToolButton{color:#1f2328;padding:4px 10px;}"
-        "QToolButton:hover{background:#e0e3e8;border-radius:4px;}"
-        "QToolButton:disabled{color:#9aa0a6;}"
-        "QComboBox,QSpinBox,QLineEdit{background:#ffffff;color:#1f2328;"
-        "border:1px solid #c9ced6;border-radius:4px;padding:3px 8px;min-height:20px;}"
-        "QComboBox:disabled,QSpinBox:disabled,QLineEdit:disabled{color:#9aa0a6;}"
-        "QTreeWidget,QListWidget{background:#ffffff;color:#1f2328;border:none;font-size:13px;}"
-        /* 交替行色不用 QSS(::item:alternate 会盖住 item 的 BackgroundRole,
-         * 如变量对话框文件行的淡蓝色), 交给 palette::AlternateBase */
-        "QTreeWidget::item:selected,QListWidget::item:selected{background:#cfe3ff;color:#0b57d0;}"
-        "QHeaderView::section{background:#f3f4f6;color:#57606a;border:none;"
-        "border-right:1px solid #d8dbe0;padding:4px 6px;}"
-        "QTreeWidget::indicator,QListWidget::indicator{width:14px;height:14px;}"
-        "QTreeWidget::indicator:unchecked{border:1px solid #8b949e;"
-        "border-radius:3px;background:#ffffff;}"
-        "QTreeWidget::indicator:checked{border:1px solid #4d8dff;"
-        "border-radius:3px;background:#0a6cff;image:url(:/icons/check.svg);}"
-        "QPushButton{background:#ffffff;color:#1f2328;border:1px solid #c9ced6;"
-        "border-radius:4px;padding:4px 14px;}"
-        "QPushButton:hover{background:#e6e8eb;}"
-        "QPushButton:disabled{color:#9aa0a6;}"
-        "QDockWidget::title{background:#f3f4f6;color:#57606a;padding:5px;}"
-        "QSplitter::handle{background:#d8dbe0;}"
-        "QStatusBar{background:#f3f4f6;color:#57606a;}");
+    qApp->setStyleSheet(makeStyleSheet(dark));
+
+    if (themeLight_) themeLight_->setChecked(themeMode_ == "light");
+    if (themeDark_) themeDark_->setChecked(themeMode_ == "dark");
+    if (themeSystem_) themeSystem_->setChecked(themeMode_ == "system");
+    if (dashboard_) {
+        dashboard_->refresh();
+        dashboard_->update();
+    }
+    if (plot_) plot_->replot();
 }
 
 /* 退出时保存会话: 工具栏参数 + 变量对话框导入文件与勾选状态 */
@@ -147,7 +332,9 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     s.setValue("toolbar/device", ui->deviceBox->currentText());
     s.setValue("toolbar/interval", intervalSpin_->value());
     s.setValue("toolbar/tck", ui->tckBox->currentText());
+    s.setValue("appearance/theme", themeMode_);
     varDialog_->saveState(s);
+    dashboard_->saveState(s);
     QMainWindow::closeEvent(e);
 }
 
@@ -193,15 +380,24 @@ void MainWindow::buildUi() {
     } else {
         static const QHash<QString, QString> dispNames{
             {"gslink", "GS32-Link"}, {"jlink", "JLink"},
-            {"sim", "Simulation"}, {"openocd", "OpenOCD"}};
+            {"sim", "Simulation"}, {"sci", "SCI"}, {"can", "CAN-GW"},
+            {"openocd", "OpenOCD"}};
         for (const QString& b : backends)
             backendBox_->addItem(dispNames.value(b, b), b);
     }
 
-    /* 波形:绘制列表 = 3:1 */
+    /* 波形:绘制列表 = 3:1; 波形与仪表盘放在左侧同一个 Tab 里 */
+    dashboard_ = new DashboardWidget(this);
+    dashboard_->setMonitorModel(model_);
+    leftTabs_ = new QTabWidget(this);
+    leftTabs_->addTab(plot_, "波形");
+    leftTabs_->addTab(dashboard_, "仪表盘");
+    ui->mainSplitter->insertWidget(0, leftTabs_);
     ui->mainSplitter->setStretchFactor(0, 3);
     ui->mainSplitter->setStretchFactor(1, 1);
     ui->mainSplitter->setSizes({540, 180});
+    connect(dashboard_, &DashboardWidget::writeRequested,
+            this, &MainWindow::onDashboardWrite);
 
     monDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     monDock_->setMonitorModel(model_);
@@ -212,6 +408,46 @@ void MainWindow::buildUi() {
     connect(actStart_, &QAction::triggered, this, &MainWindow::onStartClicked);
     connect(actSingle_, &QAction::triggered, this, &MainWindow::onSingleClicked);
     connect(ui->actVar, &QAction::triggered, this, &MainWindow::onOpenVariableDialog);
+
+    /* 波形数据操作: 导出 CSV / 清空; 放到菜单里, 避免工具栏拥挤 */
+    actSimDemo_ = new QAction("仿真演示", this);
+    actCsv_ = new QAction("导出 CSV", this);
+    actClear_ = new QAction("清空波形", this);
+    actCsv_->setShortcut(QKeySequence("Ctrl+Shift+E"));
+    actClear_->setShortcut(QKeySequence("Ctrl+Shift+L"));
+    ui->mainToolBar->addSeparator();
+    ui->mainToolBar->addAction(actSimDemo_);
+    connect(actSimDemo_, &QAction::triggered, this, &MainWindow::onSimDemo);
+    connect(actCsv_, &QAction::triggered, this, &MainWindow::onExportCsv);
+    connect(actClear_, &QAction::triggered, this, &MainWindow::onClearPlot);
+
+    auto* dataMenu = menuBar()->addMenu("数据(&D)");
+    dataMenu->addAction(actCsv_);
+    dataMenu->addAction(actClear_);
+    auto* viewMenu = menuBar()->addMenu("视图(&V)");
+    viewMenu->addAction("波形", this, [this] { leftTabs_->setCurrentIndex(0); });
+    viewMenu->addAction("仪表盘", this, [this] { leftTabs_->setCurrentIndex(1); });
+
+    auto* themeMenu = menuBar()->addMenu("主题(&T)");
+    themeGroup_ = new QActionGroup(this);
+    themeGroup_->setExclusive(true);
+    themeLight_ = themeMenu->addAction("浅色");
+    themeDark_ = themeMenu->addAction("深色");
+    themeSystem_ = themeMenu->addAction("跟随系统");
+    const struct { QAction* act; const char* mode; } themes[] = {
+        {themeLight_, "light"}, {themeDark_, "dark"}, {themeSystem_, "system"},
+    };
+    for (const auto& t : themes) {
+        t.act->setCheckable(true);
+        t.act->setData(QString::fromLatin1(t.mode));
+        themeGroup_->addAction(t.act);
+    }
+    connect(themeGroup_, &QActionGroup::triggered, this, [this](QAction* a) {
+        const QString mode = a->data().toString();
+        QSettings().setValue("appearance/theme", mode);
+        applyTheme(mode);
+        menuBar()->setActiveAction(nullptr);   /* 清掉菜单栏残留高亮 */
+    });
 }
 
 /* ---------------- 连接 ---------------- */
@@ -221,18 +457,43 @@ void MainWindow::onConnectClicked() {
     if (!link_.load(backend)) { setStatus("加载驱动失败: " + link_.lastError(), true); return; }
     gs32_config_t cfg{};
     const QByteArray bBackend = backend.toUtf8();
+    QByteArray bExtra;
+    if (backend == "sci" || backend == "can") {
+        QString sciCfg = qEnvironmentVariable("GS32SCOPE_SCI_CONFIG");
+        if (sciCfg.isEmpty()) {
+            QSettings s;
+            const QString def = backend == "can" ? "tcp:127.0.0.1:7001"
+                                                  : "tcp:127.0.0.1:7000";
+            sciCfg = s.value("toolbar/" + backend + "Config", def).toString();
+            const QString defPort = backend == "can" ? "7001" : "7000";
+            const QString hint = "串口: COM3@115200\nTCP 测试/网关: tcp:127.0.0.1:" + defPort;
+            bool ok = false;
+            sciCfg = QInputDialog::getText(
+                this, backend == "can" ? "CAN 网关配置" : "SCI 配置",
+                hint, QLineEdit::Normal, sciCfg, &ok);
+            if (!ok || sciCfg.trimmed().isEmpty()) return;
+            s.setValue("toolbar/" + backend + "Config", sciCfg.trimmed());
+        }
+        bExtra = sciConfigToJson(sciCfg);
+    }
     /* 目标下拉框: RV32 → riscv32(驱动内部识别名) */
     const QString devText = ui->deviceBox->currentText();
     const QByteArray bDevice = (devText == "RV32" ? QString("riscv32") : devText).toUtf8();
-    const QByteArray bIf = backend == "gslink"
-                         ? QByteArray("jtag") : QByteArray("swd");
+    const QByteArray bIf = backend == "gslink" ? QByteArray("jtag")
+                         : (backend == "sci" ? QByteArray("serial")
+                         : (backend == "can" ? QByteArray("can") : QByteArray("swd")));
     cfg.backend = bBackend.constData();
     cfg.device = bDevice.constData();
     cfg.interface = bIf.constData();
+    cfg.extra = bExtra.isEmpty() ? nullptr : bExtra.constData();
     const auto* tck = findChild<QComboBox*>("tckBox");
     cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt() * 1000) : 4000;
     if (!link_.open(cfg)) { setStatus("连接失败: " + link_.lastErrorText(), true); link_.close(); return; }
     connectedBackend_ = backend;
+    /* 新连接 = 新会话时间轴, 清空旧波形/历史 */
+    plot_->clearData();
+    history_.clear();
+    t0Ns_ = 0;
     actConn_->setEnabled(false); actDisc_->setEnabled(true);
     setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/采样间隔/TCK */
     updateStartAction();   /* 连续/单次采样按钮同条件使能 */
@@ -427,9 +688,11 @@ void MainWindow::onRemoveRoot(int rootIdx) {
 
 /* ---------------- 模型 -> 界面 ---------------- */
 void MainWindow::onModelChanged() {
+    pruneHistory();
     monDock_->rebuild();
     dispList_->rebuild();
     syncPlotChannels();
+    dashboard_->refresh();
     reconfigureEngine();
     updateStartAction();
 }
@@ -439,16 +702,28 @@ void MainWindow::onLeafShownChanged(int) {
     syncPlotChannels();
 }
 
+/* 移除已不存在的叶子的历史, 防止长期运行内存增长 */
+void MainWindow::pruneHistory() {
+    for (auto it = history_.begin(); it != history_.end();) {
+        if (model_->leafIndexByPath(it.key()) < 0) it = history_.erase(it);
+        else ++it;
+    }
+}
+
 void MainWindow::syncPlotChannels() {
     QSet<QString> want;
     for (int li = 0; li < model_->leafCount(); ++li) {
         const auto& lf = model_->leaf(li);
         if (lf.shown) {
             want.insert(lf.path);
-            if (!plot_->hasChannel(lf.path))
+            if (!plot_->hasChannel(lf.path)) {
                 plot_->addChannel(lf.path, model_->root(lf.rootIdx).color);
-            else
+                /* 加入显示集时回放已经采到的历史 */
+                if (history_.contains(lf.path))
+                    plot_->setChannelData(lf.path, history_.value(lf.path));
+            } else {
                 plot_->setChannelColor(lf.path, model_->root(lf.rootIdx).color);
+            }
         }
     }
     for (const QString& name : plot_->channelNames())
@@ -459,16 +734,39 @@ void MainWindow::syncPlotChannels() {
 /* ---------------- 数据流 ---------------- */
 void MainWindow::onBatchReady(const SampleBatch& batch) {
     if (batch.tNs.isEmpty()) return;
-    const double tLastSec = batch.tNs.last() / 1e9;
+    if (t0Ns_ == 0) t0Ns_ = batch.tNs.first();
+
+    constexpr double kHistorySec = 60.0;
+    constexpr int kMaxHistoryPoints = 30000;   /* 每叶子约 30s@1kHz 或 60s@500Hz */
+    const double tNow = (batch.tNs.last() - t0Ns_) / 1e9;
+
     for (int k = 0; k < batch.values.size() && k < model_->leafCount(); ++k) {
-        model_->updateLeafValue(k, batch.values[k].last());
+        const auto& vals = batch.values[k];
+        /* 统计必须覆盖 batch 内全部样本(旧实现只取 last(), 会漏掉批内尖峰) */
+        model_->updateLeafValues(k, vals);
+
         const auto& lf = model_->leaf(k);
-        if (!lf.shown) continue;
-        for (int i = 0; i < batch.tNs.size(); ++i)
-            plot_->appendData(lf.path, batch.tNs[i] / 1e9, batch.values[k][i]);
+        const int n = std::min(batch.tNs.size(), vals.size());
+        QVector<QPointF> pts;
+        pts.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            const double t = (batch.tNs[i] - t0Ns_) / 1e9;
+            pts.append(QPointF(t, vals[i]));
+        }
+
+        /* 所有叶子都保留历史, 这样后加入显示集的通道能立即回放 */
+        QVector<QPointF>& hist = history_[lf.path];
+        hist += pts;
+        if (hist.size() > kMaxHistoryPoints)
+            hist.remove(0, hist.size() - kMaxHistoryPoints);
+        while (!hist.isEmpty() && hist.first().x() < tNow - kHistorySec)
+            hist.removeFirst();
+
+        if (lf.shown && plot_->hasChannel(lf.path))
+            plot_->appendBatch(lf.path, pts);
     }
-    plot_->trimBefore(tLastSec);
-    plot_->replot();
+    plot_->trimBefore(tNow);
+    /* 实际重绘由 plotTimer_(30fps) 完成, 避免按批次频率重绘 */
 }
 
 void MainWindow::onStats(const EngineStats& st) {
@@ -487,6 +785,147 @@ void MainWindow::onStats(const EngineStats& st) {
 
 void MainWindow::onUiTick() {
     monDock_->refresh();
+    dispList_->refreshStats();
+    dashboard_->refresh();
+}
+
+void MainWindow::onExportCsv() {
+    if (!plot_->hasData()) {
+        setStatus("当前没有波形数据可导出", true);
+        return;
+    }
+    /* GS32SCOPE_CSV 供自动化/无头测试直接指定输出文件; 正常使用走文件对话框 */
+    QString path = qEnvironmentVariable("GS32SCOPE_CSV");
+    if (path.isEmpty())
+        path = QFileDialog::getSaveFileName(
+            this, "导出波形 CSV", "gs32scope_wave.csv", "CSV 文件 (*.csv)");
+    if (path.isEmpty()) return;
+    QString err;
+    if (plot_->exportCsv(path, &err))
+        setStatus("已导出: " + path);
+    else
+        setStatus("导出失败: " + err, true);
+}
+
+void MainWindow::onClearPlot() {
+    plot_->clearData();
+    history_.clear();
+    t0Ns_ = 0;
+    setStatus("已清空波形与历史");
+}
+
+/* ---------------- 写入 ---------------- */
+bool MainWindow::writeVariable(const QString& path, double value, bool confirm) {
+    const int li = model_->leafIndexByPath(path);
+    if (li < 0) { setStatus("写入失败: 未找到变量 " + path, true); return false; }
+    if (connectedBackend_.isEmpty() || !link_.isLoaded()) {
+        setStatus("写入失败: 尚未连接目标", true);
+        return false;
+    }
+    const MonitorLeaf& lf = model_->leaf(li);
+    if (confirm) {
+        const QString msg = QString("确认写入？\n\n%1\n地址 0x%2\n新值 %3")
+                                .arg(path)
+                                .arg(lf.def.addr, 8, 16, QChar('0'))
+                                .arg(QString::number(value, 'g', 9));
+        if (QMessageBox::question(this, "确认写入", msg) != QMessageBox::Yes)
+            return false;
+    }
+    const WriteResult r = VariableWriter::write(&link_, lf.def, value);
+    if (!r.ok) {
+        setStatus("写入失败: " + r.error, true);
+        return false;
+    }
+    model_->setLeafCurrent(li, r.readback);
+    setStatus(QString("写入成功: %1 = %2 (回读 %3)")
+                  .arg(path, QString::number(value, 'g', 9),
+                       QString::number(r.readback, 'g', 9)));
+    return true;
+}
+
+void MainWindow::onWriteLeaf(int leafIdx) {
+    if (leafIdx < 0 || leafIdx >= model_->leafCount()) return;
+    if (connectedBackend_.isEmpty() || !link_.isLoaded()) {
+        setStatus("写入失败: 尚未连接目标", true);
+        return;
+    }
+    const MonitorLeaf& lf = model_->leaf(leafIdx);
+    WriteDialog dlg(lf.def, lf.cur, this);
+    if (dlg.exec() == QDialog::Accepted)
+        writeVariable(lf.path, dlg.value(), false);
+}
+
+void MainWindow::onDashboardWrite(const QString& path, double value) {
+    writeVariable(path, value, false);
+}
+
+/* ---------------- 仿真演示 ---------------- */
+void MainWindow::loadSimDemoVariables() {
+    struct DemoVar {
+        const char* name;
+        uint32_t addr;
+        VariableDef::Type type;
+        bool plot;
+    };
+    static const DemoVar kDemo[] = {
+        {"sim.speed",   0x20100000u, VariableDef::Float,  true},
+        {"sim.current", 0x20100004u, VariableDef::Float,  true},
+        {"sim.target",  0x20100008u, VariableDef::Float,  false},
+        {"sim.enable",  0x2010000Cu, VariableDef::Uint32, false},
+        {"sim.temp",    0x20100010u, VariableDef::Float,  true},
+    };
+    int added = 0;
+    for (const auto& d : kDemo) {
+        const QString name = QString::fromLatin1(d.name);
+        if (model_->leafIndexByPath(name) >= 0) continue;
+        VariableDef def;
+        def.name = name;
+        def.addr = d.addr;
+        def.size = 4;
+        def.type = d.type;
+        model_->addLeafRoot(def);
+        if (d.plot) {
+            const int li = model_->leafIndexByPath(name);
+            if (li >= 0) model_->setLeafShown(li, true);
+        }
+        ++added;
+    }
+    if (connectedBackend_ == "sim" || connectedBackend_ == "sci" ||
+        connectedBackend_ == "can") {
+        /* 给演示面板一个确定的初始状态: 目标 80, 使能关闭 */
+        writeVariable("sim.target", 80.0, false);
+        writeVariable("sim.enable", 0.0, false);
+    }
+    setStatus(QString("仿真演示变量已加载(%1 个新增)").arg(added));
+}
+
+void MainWindow::onSimDemo() {
+    /* 自动化/测试可用 GS32SCOPE_BACKEND 强制后端(sim/sci) */
+    const QString forced = qEnvironmentVariable("GS32SCOPE_BACKEND");
+    if (!forced.isEmpty()) {
+        const int fi = backendBox_->findData(forced);
+        if (fi >= 0) backendBox_->setCurrentIndex(fi);
+    }
+    if (connectedBackend_.isEmpty()) {
+        const QString want = backendBox_->currentData().toString();
+        if (want != "sim" && want != "sci" && want != "can") {
+            const int idx = backendBox_->findData("sim");
+            if (idx < 0) { setStatus("未找到 Simulation/SCI/CAN 驱动", true); return; }
+            backendBox_->setCurrentIndex(idx);
+        }
+        onConnectClicked();
+        if (connectedBackend_.isEmpty()) return;
+    }
+    if (connectedBackend_ != "sim" && connectedBackend_ != "sci" &&
+        connectedBackend_ != "can") {
+        setStatus("仿真演示需要 Simulation/SCI/CAN 后端, 请先断开当前连接", true);
+        return;
+    }
+
+    loadSimDemoVariables();
+    if (dashboard_->itemCount() == 0) dashboard_->createDemoPanel();
+    if (leftTabs_) leftTabs_->setCurrentWidget(dashboard_);
+    if (!engine_->running() && !stopping_) onStartClicked();
 }
 
 /* 状态栏左侧消息 label(懒创建, buildUi 与 setStatus 共用) */

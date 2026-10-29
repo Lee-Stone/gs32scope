@@ -15,7 +15,6 @@ bool SvdParser::parse(const QString& path, QVector<SvdPeripheral>& out,
     SvdRegister*   curReg  = nullptr;
     /* <size>/<bitOffset>/<bitWidth> 的值先存为文本, 结束标签时落盘 */
     QString textVal;
-    int pendingRole = 0;   /* 1=base 2=regOff 3=regSize 4=fldOff 5=fldWidth 6=lsb 7=msb */
     uint32_t pendU = 0;
 
     auto toU32 = [](const QString& s) -> uint32_t {

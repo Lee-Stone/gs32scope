@@ -76,7 +76,19 @@ public:
         return rc == GS32_OK;
     }
 
-    bool caps(uint32_t* c) { return fn_get_caps_(h_, c) == GS32_OK; }
+    bool write(const gs32_mem_region_t* regions, uint32_t count,
+               const uint8_t* in, uint32_t size, uint32_t timeout_ms) {
+        if (!h_ || !fn_write_) { lastError_ = QStringLiteral("驱动未打开或不支持写入"); return false; }
+        int rc = fn_write_(h_, regions, count, in, size, timeout_ms);
+        if (rc != GS32_OK) lastError_ = QString::fromUtf8(fn_last_error_(h_));
+        return rc == GS32_OK;
+    }
+
+    bool caps(uint32_t* c) { return h_ && fn_get_caps_ && fn_get_caps_(h_, c) == GS32_OK; }
+    bool hasCap(uint32_t bit) {
+        uint32_t c = 0;
+        return caps(&c) && (c & bit) != 0;
+    }
     QString lastErrorText() const { return lastError_; }
 
     /* 诊断统计: 最近一次批量读取的 FT_Write 提交耗时(ms)。

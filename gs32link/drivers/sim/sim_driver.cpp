@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -29,6 +30,9 @@ struct SimState {
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     uint32_t latency_us = 200;
     double   noise      = 0.05;
+    /* 写入回读: 地址 -> 最近写入的 32bit 字。写过的通道保持写入值,
+     * 用于上位机写入/滑块联调(未写通道仍按时间合成波形)。 */
+    std::unordered_map<uint32_t, uint32_t> held;
     std::atomic<uint32_t> caps{GS32_CAP_POLL | GS32_CAP_WRITE /*写可回读校验*/};
 };
 
@@ -105,6 +109,28 @@ GS32LINK_EXPORT int gs32_read(gs32_handle_t h,
     uint8_t* p = out_buf;
     for (uint32_t r = 0; r < count; ++r) {
         for (uint32_t off = 0; off + 4 <= regions[r].size; off += 4, ++channel) {
+            const uint32_t wordAddr = regions[r].addr + off;
+            auto hit = s->held.find(wordAddr);
+            if (hit != s->held.end()) {
+                const uint32_t w = hit->second;
+                memcpy(p + off, &w, 4);
+                continue;
+            }
+            /* 0x20100000..0x20100010: 电机演示信号(供 --demo 使用) */
+            if (wordAddr >= 0x20100000u && wordAddr <= 0x20100010u) {
+                double dv = 0.0;
+                switch (wordAddr) {
+                case 0x20100000u: dv = 60.0 + 40.0 * std::sin(2.0 * 3.14159265358979 * 0.2 * t); break;
+                case 0x20100004u: dv = 2.0 + 1.5 * std::sin(2.0 * 3.14159265358979 * 1.5 * t); break;
+                case 0x20100008u: dv = 80.0; break;
+                case 0x2010000Cu: dv = 1.0; break;
+                case 0x20100010u: dv = 45.0 + 5.0 * std::sin(2.0 * 3.14159265358979 * 0.05 * t); break;
+                default: break;
+                }
+                const float fv = (float)dv;
+                memcpy(p + off, &fv, 4);
+                continue;
+            }
             const double freq  = 0.5 + 0.7 * channel;              /* Hz */
             const double amp   = (channel % 3 == 0) ? 100.0 : (channel % 3 == 1 ? 1.0 : 50.0);
             double v = amp * std::sin(2.0 * 3.14159265358979 * freq * t + 0.8 * channel);
@@ -130,8 +156,27 @@ GS32LINK_EXPORT int gs32_write(gs32_handle_t h,
                                const gs32_mem_region_t* regions, uint32_t count,
                                const uint8_t* in_buf, uint32_t buf_size,
                                uint32_t timeout_ms) {
-    (void)h; (void)regions; (void)count; (void)in_buf; (void)buf_size; (void)timeout_ms;
-    return GS32_OK; /* 模拟器接受任意写入 */
+    (void)timeout_ms;
+    auto* s = static_cast<SimState*>(h);
+    if (!s || !regions || !count || !in_buf) return GS32_ERR_PARAM;
+    std::lock_guard<std::mutex> lk(s->mtx);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < count; ++i) total += regions[i].size;
+    if (buf_size < total) {
+        s->err.set(GS32_ERR_PARAM, "in_buf too small");
+        return GS32_ERR_PARAM;
+    }
+    const uint8_t* p = in_buf;
+    for (uint32_t r = 0; r < count; ++r) {
+        for (uint32_t off = 0; off + 4 <= regions[r].size; off += 4) {
+            uint32_t w = 0;
+            memcpy(&w, p + off, 4);
+            s->held[regions[r].addr + off] = w;
+        }
+        p += regions[r].size;
+    }
+    s->err.clear();
+    return GS32_OK;
 }
 
 GS32LINK_EXPORT const char* gs32_last_error(gs32_handle_t h) {

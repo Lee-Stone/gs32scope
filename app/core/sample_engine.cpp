@@ -1,8 +1,10 @@
 #include "sample_engine.h"
+#include "value_codec.h"
 #include <chrono>
 #include <cstring>
 #ifdef _WIN32
 #include <windows.h>
+#include <timeapi.h>   /* timeBeginPeriod/timeEndPeriod (WIN32_LEAN_AND_MEAN 下不随 windows.h 引入) */
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
@@ -13,25 +15,6 @@ using Clock = std::chrono::steady_clock;
 inline qint64 nsSinceEpoch(const Clock::time_point& tp) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                tp.time_since_epoch()).count();
-}
-
-double decode(const VariableDef& v, const uint8_t* p) {
-    uint64_t raw = 0;
-    memcpy(&raw, p, std::min<uint32_t>(v.size, 8));
-    uint64_t val;
-    switch (v.type) {
-    case VariableDef::Float: { float f; memcpy(&f, p, 4); return f; }
-    case VariableDef::Int8:  val = (uint64_t)(int64_t)(int8_t)p[0]; break;
-    case VariableDef::Int16: { int16_t x; memcpy(&x, p, 2);
-                              val = (uint64_t)(int64_t)x; } break;
-    case VariableDef::Int32: { int32_t x; memcpy(&x, p, 4);
-                               val = (uint64_t)(int64_t)x; } break;
-    default: val = raw; break;
-    }
-    if (v.bitOffset >= 0)
-        return double((val >> v.bitOffset) &
-                      ((v.bitWidth >= 64) ? ~0ull : ((1ull << v.bitWidth) - 1ull)));
-    return double(val);
 }
 } // namespace
 
@@ -151,7 +134,10 @@ void SampleEngine::runLoop() {
             for (size_t i = 0; i < leafSpecs_.size(); ++i) {
                 const LeafSpec& s = leafSpecs_[i];
                 const uint8_t* p = readBuf_.data() + s.byteOff;
-                batch.values[i].append(decode(s.def, p));
+                double v = gs32::decodeValue(s.def, p);
+                if (s.def.bitOffset >= 0)
+                    v = gs32::decodeBitfield(s.def, gs32::readRaw(s.def, p));
+                batch.values[i].append(v);
             }
             batch.tNs.append(tReadNs);
             ++statCnt;

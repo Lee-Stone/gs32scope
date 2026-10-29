@@ -64,13 +64,18 @@ public:
     int leafIndexByPath(const QString& path) const { return leafIdx_.value(path, -1); }
 
     void updateLeafValue(int leafIdx, double v);
+    void updateLeafValues(int leafIdx, const QVector<double>& values);
+    void setLeafCurrent(int leafIdx, double v);   /* 写入回读后即时刷新, 不计入统计 */
     void setLeafShown(int leafIdx, bool on);
+    /* 批量显示/隐藏(整组勾选时只发一次信号, 避免上百次 UI 重建) */
+    void setLeavesShown(const QVector<int>& leafIdxs, bool on);
     void resetStats();
 
 signals:
     void changed();
     void leafValueChanged(int leafIdx);
     void leafShownChanged(int leafIdx);
+    void leavesShownChanged();   /* 批量显示/隐藏完成 */
 
 private:
     MonitorNode* buildNode(const DwarfVar& v, const QString& prefix,

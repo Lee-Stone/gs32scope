@@ -1,6 +1,6 @@
-# GS32Link Í¨Ñ¶¿â Makefile (MinGW g++)
-# ÓÃ·¨: ÔÚ±¾Ä¿Â¼Ö´ÐÐ mingw32-make
-# Êä³ö: ..\drivers\ ÏÂµÄ gs32link_sim.dll / gs32link_jlink.dll / gs32link_gslink.dll
+# GS32Link é€šè®¯åº“ Makefile (MinGW g++)
+# ç”¨æ³•: åœ¨æœ¬ç›®å½•æ‰§è¡Œ mingw32-make
+# è¾“å‡º: ..\drivers\ ä¸‹çš„ gs32link_sim.dll / gs32link_jlink.dll / gs32link_gslink.dll / gs32link_sci.dll
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DGS32LINK_BUILDING
@@ -9,7 +9,7 @@ LDFLAGS   = -shared -static-libgcc -static-libstdc++
 
 OUTDIR = ..\drivers
 
-all: $(OUTDIR)\gs32link_sim.dll $(OUTDIR)\gs32link_jlink.dll $(OUTDIR)\gs32link_gslink.dll
+all: $(OUTDIR)\gs32link_sim.dll $(OUTDIR)\gs32link_jlink.dll $(OUTDIR)\gs32link_gslink.dll $(OUTDIR)\gs32link_sci.dll $(OUTDIR)\gs32link_can.dll
 
 $(OUTDIR)\gs32link_sim.dll: drivers\sim\sim_driver.cpp include\gs32link.h common\gs32link_util.h
 	@if not exist $(OUTDIR) mkdir $(OUTDIR)
@@ -26,10 +26,20 @@ $(OUTDIR)\gs32link_gslink.dll: $(GSLINK_SRCS) $(GSLINK_HDRS) include\gs32link.h 
 	@if not exist $(OUTDIR) mkdir $(OUTDIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $(GSLINK_SRCS)
 
+$(OUTDIR)\gs32link_sci.dll: drivers\sci\sci_driver.cpp include\gs32link.h common\gs32link_util.h
+	@if not exist $(OUTDIR) mkdir $(OUTDIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ drivers\sci\sci_driver.cpp -lws2_32
+
+$(OUTDIR)\gs32link_can.dll: drivers\sci\sci_driver.cpp include\gs32link.h common\gs32link_util.h
+	@if not exist $(OUTDIR) mkdir $(OUTDIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) -DGS32LINK_DRIVER_CAN -o $@ drivers\sci\sci_driver.cpp -lws2_32
+
 clean:
 	@if exist $(OUTDIR)\gs32link_sim.dll del /q $(OUTDIR)\gs32link_sim.dll
 	@if exist $(OUTDIR)\gs32link_jlink.dll del /q $(OUTDIR)\gs32link_jlink.dll
 	@if exist $(OUTDIR)\gs32link_gslink.dll del /q $(OUTDIR)\gs32link_gslink.dll
+	@if exist $(OUTDIR)\gs32link_sci.dll del /q $(OUTDIR)\gs32link_sci.dll
+	@if exist $(OUTDIR)\gs32link_can.dll del /q $(OUTDIR)\gs32link_can.dll
 
 .PHONY: all clean
 

@@ -1,5 +1,6 @@
 # GS32Scope 上位机
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets PrintSupport)
@@ -10,16 +11,23 @@ add_executable(GS32Scope WIN32
     main.cpp
     core/sample_engine.cpp
     core/monitor_model.cpp
+    core/variable_writer.cpp
     gui/mainwindow.cpp
+    gui/mainwindow.ui
+    gui/combo_box.h
+    gui/spin_box.h
     gui/plot_widget.cpp
+    gui/dashboard_widget.cpp
     gui/variable_dialog.cpp
     gui/monitor_dock.cpp
     gui/display_list.cpp
+    gui/write_dialog.cpp
     symbols/elf_parser.cpp
     symbols/svd_parser.cpp
     symbols/dwarf_parser.cpp
     resources/app.qrc
     ${QCUSTOMPLOT_DIR}/qcustomplot.cpp
+    ${QCUSTOMPLOT_DIR}/qcustomplot.h
 )
 
 target_include_directories(GS32Scope PRIVATE

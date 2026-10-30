@@ -10,6 +10,7 @@
 #include <QColor>
 #include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QVector>
 
 struct MonitorNode {
@@ -26,10 +27,12 @@ struct MonitorLeaf {
     QString     path;
     VariableDef def;
     int         rootIdx = -1;
-    double      cur = 0, min = 0, max = 0, sum = 0;
+    double      cur = 0, min = 0, max = 0;
     qint64      n = 0;
     bool        shown = false;     /* 绘制列表/波形 */
     bool        monitored = true;  /* 监控列表(右侧); 绘制专用叶子为 false */
+    bool        hex = false;       /* 显示格式: false=DEC(默认), true=HEX */
+    QColor      color;             /* 该叶子自己的波形颜色 */
     quint64     shownSeq = 0;      /* 加入绘制顺序: 新加入的排在底部表格最后 */
 };
 
@@ -67,6 +70,8 @@ public:
     void updateLeafValue(int leafIdx, double v);
     void updateLeafValues(int leafIdx, const QVector<double>& values);
     void setLeafCurrent(int leafIdx, double v);   /* 写入回读后即时刷新, 不计入统计 */
+    void setLeafHex(int leafIdx, bool hex);       /* 监控表显示格式 DEC/HEX */
+    void setLeafColor(int leafIdx, const QColor& color);  /* 手动设置波形颜色 */
     void setLeafShown(int leafIdx, bool on);
     /* 批量显示/隐藏(整组勾选时只发一次信号, 避免上百次 UI 重建) */
     void setLeavesShown(const QVector<int>& leafIdxs, bool on);
@@ -76,6 +81,7 @@ signals:
     void changed();
     void leafValueChanged(int leafIdx);
     void leafShownChanged(int leafIdx);
+    void leafColorChanged(int leafIdx);
     void leavesShownChanged();   /* 批量显示/隐藏完成 */
 
 private:
@@ -87,6 +93,7 @@ private:
     QVector<MonitorRoot*> roots_;   /* 指针向量: 避免含裸指针的浅拷贝导致悬垂 */
     QVector<MonitorLeaf> leaves_;
     QHash<QString, int>  leafIdx_;
+    QSet<QRgb> usedColors_;
     int colorIdx_ = 0;
     quint64 shownSeq_ = 0;
 };

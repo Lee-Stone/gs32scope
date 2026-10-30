@@ -48,7 +48,8 @@ private slots:
     void onOpenVariableDialog();
     void onMonitorAdded(const DwarfVar& v);
     void onMonitorRemoved(const QString& rootPath);
-    void onDisplayToggled(const VariableDef& def, bool on);
+    void onElfReloadStarted();
+    void onElfReloadFinished();
     void onRemoveRoot(int rootIdx);
     void onModelChanged();
     void onLeafShownChanged(int leafIdx);
@@ -65,7 +66,6 @@ private slots:
 
 private:
     void buildUi();
-    void refreshPortList();   /* 目标下拉: 重扫端口, 保留当前选择, 默认第一个 */
     void applyTheme(const QString& mode);   /* light / dark / system */
     bool systemPrefersDark() const;
     void reconfigureEngine();
@@ -73,6 +73,7 @@ private:
     void setConnControlsEnabled(bool on);  /* 通讯接口/目标/采样率/TCK 连接期间禁用 */
     bool startSampling(QString* err);      /* 按采样率选择 POLL 或 STREAM */
     int  rateHz() const;
+    void updatePlotRefreshRate();   /* 波形刷新频率跟随采样率 */
     void syncPlotChannels();
     void pruneHistory();
     void defaultDockLayout();
@@ -127,11 +128,19 @@ private:
 
     /* 会话时间轴(停止/继续时去除停采时间)与各叶子历史(用于新通道回放) */
     QHash<QString, QVector<QPointF>> history_;
+    struct ElfLeafState {
+        bool shown = false;
+        bool hex = false;
+        QColor color;
+        uint32_t addr = 0;
+    };
+    QHash<QString, ElfLeafState> elfUiState_;
+    bool elfReloading_ = false;
     qint64 timelineRawBaseNs_ = 0;
     qint64 timelineLogicalBaseNs_ = 0;
     qint64 lastLogicalNs_ = 0;
     bool   timelineStarted_ = false;
-    QTimer plotTimer_;                  /* 30fps 重绘, 与采样/批处理解耦 */
+    QTimer plotTimer_;                  /* 刷新率跟随采样率(≤60Hz 按采样周期, 高频封顶 60fps) */
 };
 
 #endif /* MAINWINDOW_H */

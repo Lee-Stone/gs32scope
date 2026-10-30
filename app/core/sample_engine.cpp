@@ -1,7 +1,9 @@
 #include "sample_engine.h"
 #include "value_codec.h"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>   /* timeBeginPeriod/timeEndPeriod (WIN32_LEAN_AND_MEAN 下不随 windows.h 引入) */
@@ -25,30 +27,85 @@ void SampleEngine::configure(LinkDriver* link, int intervalMs,
                              const MonitorModel* model) {
     link_ = link;
     intervalMs_ = std::max(1, intervalMs);
+    /* 低频采样时按采样周期送 GUI, 高频时最多 60fps 合并。
+     * 1kHz -> 16ms(约60fps), 50Hz -> 20ms, 10Hz -> 100ms, 1Hz -> 1s。 */
+    batchWindowMs_ = std::max(16, intervalMs_);
 
     regions_.clear();
     leafSpecs_.clear();
-    /* readBuf_ 是全部 region 顺序拼接的总缓冲:
-     * 叶子偏移 = 前面 region 累计长度 + region 内偏移(变量地址 - 根地址)。
-     * 早期版本漏加累计偏移, 导致第二个及以后的变量都读到第一块的数据 */
-    uint32_t regionOff = 0;
+    /* 先收集各根的原始区域, 再按地址排序合并连续/重叠区域.
+     * 变量表里相邻的变量(如 sinx 和 g_v_00..13)原本是 15 个 4 字节
+     * region, 每次采样要做 15 段 DMI 扫描; 合并后只需读一个连续块,
+     * 这是变量数增加时保持采样率的关键. 读取缓冲按合并后的区域排列,
+     * 叶子偏移 = 合并区域累计偏移 + (变量地址 - 合并区域起始地址). */
+    struct RawRegion { uint32_t addr; uint32_t size; };
+    std::vector<RawRegion> raw;
+    raw.reserve(size_t(model->rootCount()));
     for (int ri = 0; ri < model->rootCount(); ++ri) {
         const auto& r = model->root(ri);
-        regions_.push_back({r.addr, r.size});
+        if (r.size) raw.push_back({r.addr, r.size});
         for (int li : r.leaves) {
-            const auto& lf = model->leaf(li);
             LeafSpec s;
-            s.region = ri;
-            s.byteOff = regionOff + (lf.def.addr - r.addr);
-            s.def = lf.def;
+            s.def = model->leaf(li).def;
             leafSpecs_.push_back(s);
         }
-        regionOff += r.size;
     }
-    uint32_t total = 0;
-    for (const auto& r : regions_) total += r.size;
-    regionBytes_ = total;
-    readBuf_.resize(total ? total : 4);
+
+    std::sort(raw.begin(), raw.end(), [](const RawRegion& a, const RawRegion& b) {
+        return a.addr < b.addr;
+    });
+    std::vector<RawRegion> merged;
+    merged.reserve(raw.size());
+    for (const RawRegion& r : raw) {
+        if (merged.empty() ||
+            uint64_t(r.addr) > uint64_t(merged.back().addr) + merged.back().size) {
+            merged.push_back(r);
+        } else {
+            const uint64_t end = std::max<uint64_t>(
+                uint64_t(merged.back().addr) + merged.back().size,
+                uint64_t(r.addr) + r.size);
+            merged.back().size = uint32_t(end - merged.back().addr);
+        }
+    }
+
+    std::vector<uint32_t> starts, bufOff;
+    starts.reserve(merged.size());
+    bufOff.reserve(merged.size());
+    uint32_t off = 0;
+    for (const RawRegion& r : merged) {
+        starts.push_back(r.addr);
+        bufOff.push_back(off);
+        regions_.push_back({r.addr, r.size});
+        off += r.size;
+    }
+    regionBytes_ = off;
+
+    std::vector<size_t> fallback;
+    for (size_t si = 0; si < leafSpecs_.size(); ++si) {
+        LeafSpec& s = leafSpecs_[si];
+        const uint32_t a = s.def.addr;
+        auto it = std::upper_bound(starts.begin(), starts.end(), a);
+        int idx = int(it - starts.begin()) - 1;
+        if (idx < 0 || a < starts[idx] ||
+            uint64_t(a) + s.def.size >
+                uint64_t(starts[idx]) + merged[idx].size) {
+            /* 理论上不可达(叶子地址来自根区域); 保底单独读这一个叶子 */
+            fallback.push_back(si);
+            continue;
+        }
+        s.byteOff = bufOff[idx] + (a - starts[idx]);
+        s.region = idx;
+    }
+    /* 保底区域放在最后, 避免在正常映射过程中打乱 starts 的排序 */
+    for (size_t si : fallback) {
+        LeafSpec& s = leafSpecs_[si];
+        regions_.push_back({s.def.addr, s.def.size});
+        s.byteOff = regionBytes_;
+        s.region = int(regions_.size()) - 1;
+        regionBytes_ += s.def.size;
+    }
+
+    readBuf_.resize(regionBytes_ ? regionBytes_ : 4);
 }
 
 bool SampleEngine::start(QString* err) { return startImpl(false, err); }
@@ -258,7 +315,9 @@ void SampleEngine::runLoop() {
             batch.tNs.append(tReadNs);
             ++statCnt;
 
-            if (tReadNs - batch.tNs.first() > 200'000'000 ||
+            /* 批次窗口随采样率变化: 低频逐拍送 GUI, 高频约 60fps;
+             * 旧实现固定 200ms 会让波形每 200ms 才前进一次。 */
+            if (tReadNs - batch.tNs.first() >= qint64(batchWindowMs_) * 1000000LL ||
                 batch.tNs.size() >= 256) {
                 emit batchReady(batch);
                 batch.tNs.clear();
@@ -280,7 +339,18 @@ void SampleEngine::runLoop() {
         if (singleShot_) { running_.store(false); break; }
 
         tNext += interval;
-        if (tNext < Clock::now()) { tNext = Clock::now(); overrun = true; }
+        /* 唤醒偏晚时不要从"现在"重新起算: 那会把每次 ~0.3ms 的调度延迟
+         * 累积成 1.3ms 周期(实际只有 ~750Hz). 保持绝对相位, 跳过已经
+         * 错过的节拍, 平均采样率才能稳定在设定值 */
+        const auto nowAfterRead = Clock::now();
+        if (tNext < nowAfterRead) {
+            const qint64 behindNs = duration_cast<nanoseconds>(
+                                        nowAfterRead - tNext).count();
+            const qint64 intervalNs =
+                std::max<qint64>(1, duration_cast<nanoseconds>(interval).count());
+            const qint64 missed = behindNs / intervalNs + 1;
+            tNext += missed * interval;
+        }
 #ifdef _WIN32
         if (hTimer) {
             const qint64 remainNs = duration_cast<nanoseconds>(

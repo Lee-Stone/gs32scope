@@ -1,6 +1,7 @@
 #include "monitor_dock.h"
 #include <QAction>
 #include <QApplication>
+#include <QColorDialog>
 #include <QCursor>
 #include <QFont>
 #include <QHeaderView>
@@ -13,11 +14,13 @@
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
 #include <QVBoxLayout>
+#include <cstring>
+#include <cmath>
 #include <functional>
 
 namespace {
 enum { ColDraw = 0, ColName = 1, ColType = 2, ColAddr = 3, ColSize = 4,
-       ColVal = 5, ColMax = 6, ColMin = 7, ColAvg = 8 };
+       ColVal = 5, ColMax = 6, ColMin = 7 };
 
 /* 波形列: 选中时直接画该变量对应的波形颜色(不再画对勾) */
 class WaveColorDelegate : public QStyledItemDelegate
@@ -44,9 +47,12 @@ public:
         o.features &= ~QStyleOptionViewItem::HasCheckIndicator;
         QApplication::style()->drawControl(QStyle::CE_ItemViewItem, &o, p, o.widget);
 
-        const int s = 18;
-        const QRectF r(option.rect.center().x() - s / 2.0,
-                       option.rect.center().y() - s / 2.0, s, s);
+        /* 彩色块随行高/列宽自适应, 始终留 3px 内边距;
+         * 旧实现固定 18px, 小行高时看起来会溢出单元格。 */
+        const int s = std::max(8, std::min({14, option.rect.height() - 6,
+                                            option.rect.width() - 8}));
+        const QRectF r(std::round(option.rect.center().x() - s / 2.0),
+                       std::round(option.rect.center().y() - s / 2.0), s, s);
         const bool selected = option.state & QStyle::State_Selected;
         const QColor border = selected
             ? option.palette.color(QPalette::HighlightedText)
@@ -78,21 +84,22 @@ MonitorDock::MonitorDock(QWidget* parent)
     QFont mono = tree_->font();
     mono.setFamilies({"Consolas", "Courier New", "monospace"});
     tree_->setFont(mono);
-    tree_->setColumnCount(9);
+    tree_->setColumnCount(8);
     tree_->setHeaderLabels({"波形", "变量", "类型", "地址", "大小",
-                            "当前值", "最大值", "最小值", "平均值"});
+                            "当前值", "最大值", "最小值"});
     tree_->header()->setSectionResizeMode(QHeaderView::Interactive);
     tree_->header()->setStretchLastSection(false);
-    tree_->setColumnWidth(ColDraw, 36);
-    tree_->setColumnWidth(ColName, 110);
-    tree_->setColumnWidth(ColType, 48);
-    tree_->setColumnWidth(ColAddr, 100);
-    tree_->setColumnWidth(ColSize, 32);
-    tree_->setColumnWidth(ColVal, 70);
-    tree_->setColumnWidth(ColMax, 58);
-    tree_->setColumnWidth(ColMin, 58);
-    tree_->setColumnWidth(ColAvg, 58);
-    tree_->header()->setMinimumSectionSize(30);
+    /* 默认列宽: 变量列吃剩余宽度; 类型/地址/大小/数值列保证表头完整可见 */
+    tree_->setColumnWidth(ColDraw, 40);
+    tree_->setColumnWidth(ColName, 120);
+    tree_->setColumnWidth(ColType, 54);
+    tree_->setColumnWidth(ColAddr, 98);
+    tree_->setColumnWidth(ColSize, 52);
+    tree_->setColumnWidth(ColVal, 92);
+    tree_->setColumnWidth(ColMax, 82);
+    tree_->setColumnWidth(ColMin, 82);
+    tree_->header()->setMinimumSectionSize(34);
+    tree_->header()->setMinimumHeight(26);
     tree_->header()->setSectionResizeMode(ColName, QHeaderView::Stretch);
     tree_->header()->setDefaultAlignment(Qt::AlignCenter);
     tree_->setItemDelegateForColumn(ColDraw, new WaveColorDelegate(tree_));
@@ -132,7 +139,10 @@ static void fillNode(QTreeWidgetItem* it, const MonitorNode* node,
                      const MonitorModel* model, int rootIdx) {
     it->setData(ColName, Qt::UserRole, rootIdx);
     it->setData(ColName, Qt::UserRole + 2, node->path);
-    it->setData(ColDraw, Qt::DecorationRole, model->root(rootIdx).color);
+    const QColor nodeColor = (node->leafIdx >= 0 && node->leafIdx < model->leafCount())
+                                 ? model->leaf(node->leafIdx).color
+                                 : model->root(rootIdx).color;
+    it->setData(ColDraw, Qt::DecorationRole, nodeColor);
     it->setText(ColName, node->name);
     if (node->isStruct) {
         it->setData(ColName, Qt::UserRole + 1, -1);
@@ -180,7 +190,7 @@ static void fillNode(QTreeWidgetItem* it, const MonitorNode* node,
         it->setCheckState(ColDraw, node->leafIdx >= 0 && model->leaf(node->leafIdx).shown
                                        ? Qt::Checked : Qt::Unchecked);
     }
-    for (int c = ColDraw; c <= ColAvg; ++c)
+    for (int c = ColDraw; c <= ColMin; ++c)
         it->setTextAlignment(c, Qt::AlignCenter);
 }
 
@@ -213,26 +223,34 @@ void MonitorDock::rebuild() {
     refresh();
 }
 
-static QString fmtVal(double v, const VariableDef& d) {
-    if (d.type == VariableDef::Double) return QString::number(v, 'f', 6);
-    if (d.type == VariableDef::Float) return QString::number(v, 'f', 3);
-    if (d.bitOffset >= 0) {
-        const int w = d.bitWidth > 0 ? (d.bitWidth + 3) / 4 : 8;
-        return QStringLiteral("0x") + QString::number((quint64)v, 16)
-                   .rightJustified(w, '0').toUpper();
+static QString fmtVal(double v, const VariableDef& d, bool hex) {
+    if (hex) {
+        /* HEX 显示原始位模式, 浮点同样可用:
+         * float/double 不再被禁用, 按 IEEE-754 位模式显示。 */
+        if (d.type == VariableDef::Float) {
+            const float f = static_cast<float>(v);
+            quint32 bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            return QStringLiteral("0x") + QString::number(bits, 16)
+                       .rightJustified(8, '0').toUpper();
+        }
+        if (d.type == VariableDef::Double) {
+            quint64 bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            return QStringLiteral("0x") + QString::number(bits, 16)
+                       .rightJustified(16, '0').toUpper();
+        }
+        int width = d.size * 2;
+        if (d.bitOffset >= 0) width = d.bitWidth > 0 ? (d.bitWidth + 3) / 4 : 8;
+        return QStringLiteral("0x") + QString::number((quint64)qint64(std::llround(v)), 16)
+                   .rightJustified(width, '0').toUpper();
     }
-    switch (d.type) {
-    case VariableDef::Uint8:
-    case VariableDef::Uint16:
-    case VariableDef::Uint32:
-        return QStringLiteral("0x") + QString::number((quint64)v, 16)
-                   .rightJustified(d.size * 2, '0').toUpper();
-    case VariableDef::Uint64:
-        return QStringLiteral("0x") + QString::number((quint64)v, 16)
-                   .rightJustified(16, '0').toUpper();
-    default:
-        return QString::number(v, 'f', 0);
+    if (isFloatType(d.type)) {
+        return d.type == VariableDef::Double ? QString::number(v, 'f', 6)
+                                            : QString::number(v, 'f', 3);
     }
+    if (d.bitOffset >= 0) return QString::number(quint64(v));
+    return QString::number(v, 'f', 0);
 }
 
 void MonitorDock::refresh() {
@@ -242,10 +260,9 @@ void MonitorDock::refresh() {
         const int li = it->data(ColName, Qt::UserRole + 1).toInt();
         if (li >= 0 && li < leafCount) {
             const auto& lf = model_->leaf(li);
-            it->setText(ColVal, lf.n ? fmtVal(lf.cur, lf.def) : "—");
-            it->setText(ColMax, lf.n ? fmtVal(lf.max, lf.def) : "—");
-            it->setText(ColMin, lf.n ? fmtVal(lf.min, lf.def) : "—");
-            it->setText(ColAvg, lf.n ? fmtVal(lf.sum / lf.n, lf.def) : "—");
+            it->setText(ColVal, lf.n ? fmtVal(lf.cur, lf.def, lf.hex) : "—");
+            it->setText(ColMax, lf.n ? fmtVal(lf.max, lf.def, lf.hex) : "—");
+            it->setText(ColMin, lf.n ? fmtVal(lf.min, lf.def, lf.hex) : "—");
         }
         for (int i = 0; i < it->childCount(); ++i) walk(it->child(i));
     };
@@ -323,6 +340,28 @@ void MonitorDock::onContextMenu(const QPoint& pos) {
                 it->setCheckState(ColDraw, shown ? Qt::Unchecked : Qt::Checked);
             });
             menu.addAction("写入值…", this, [this, li] { emit writeRequested(li); });
+            const auto& lf = model_->leaf(li);
+            QMenu* fmt = menu.addMenu("显示格式");
+            QAction* dec = fmt->addAction("DEC");
+            dec->setCheckable(true);
+            dec->setChecked(!lf.hex);
+            QAction* hex = fmt->addAction("HEX");
+            hex->setCheckable(true);
+            hex->setChecked(lf.hex);
+            connect(dec, &QAction::triggered, this, [this, li] {
+                model_->setLeafHex(li, false);
+                refresh();
+            });
+            connect(hex, &QAction::triggered, this, [this, li] {
+                model_->setLeafHex(li, true);
+                refresh();
+            });
+            menu.addAction("设置波形颜色…", this, [this, li] {
+                const QColor current = model_->leaf(li).color;
+                const QColor color = QColorDialog::getColor(
+                    current, this, "选择波形颜色");
+                if (color.isValid()) model_->setLeafColor(li, color);
+            });
         } else if (it->childCount() > 0) {
             menu.addAction("整组添加到波形", this, [it] {
                 it->setCheckState(ColDraw, Qt::Checked);
@@ -331,7 +370,7 @@ void MonitorDock::onContextMenu(const QPoint& pos) {
                 it->setCheckState(ColDraw, Qt::Unchecked);
             });
         }
-        menu.addAction("从监控列表移除(按根)", this, [this, it] {
+        menu.addAction("从监控列表移除", this, [this, it] {
             QTreeWidgetItem* root = it;
             while (root->parent()) root = root->parent();
             emit removeRootRequested(root->data(ColName, Qt::UserRole).toInt());
@@ -344,7 +383,7 @@ void MonitorDock::onHeaderMenu(const QPoint& pos) {
     QMenu menu(this);
     const struct { int col; const char* text; } opts[] = {
         {ColType, "类型"}, {ColSize, "大小"},
-        {ColMax, "最大值"}, {ColMin, "最小值"}, {ColAvg, "均值"},
+        {ColMax, "最大值"}, {ColMin, "最小值"},
     };
     for (const auto& o : opts) {
         auto* act = menu.addAction(o.text);

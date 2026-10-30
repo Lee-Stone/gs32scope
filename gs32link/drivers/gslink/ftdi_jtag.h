@@ -33,6 +33,7 @@ struct D2xxApi {
     FT_STATUS (WINAPI *Read)(FT_HANDLE, void*, unsigned long, unsigned long*) = nullptr;
     FT_STATUS (WINAPI *SetBitMode)(FT_HANDLE, unsigned char, unsigned char) = nullptr;
     FT_STATUS (WINAPI *SetTimeouts)(FT_HANDLE, unsigned long, unsigned long) = nullptr;
+    FT_STATUS (WINAPI *SetLatencyTimer)(FT_HANDLE, unsigned char) = nullptr;
     FT_STATUS (WINAPI *ResetDevice)(FT_HANDLE) = nullptr;
     FT_STATUS (WINAPI *Purge)(FT_HANDLE, unsigned long) = nullptr;
 

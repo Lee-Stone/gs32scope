@@ -2,8 +2,8 @@
 #define SAMPLE_ENGINE_H
 /*
  * SampleEngine - POLL 模式采样引擎
- * 按监控根(结构体整块/单变量)聚合读取: 每个根一个内存区域, 一次事务读整块,
- * 叶子从缓冲按偏移裁剪解码。独立线程 + deadline 调度。
+ * 按地址合并连续/重叠的监控区域后整块读取, 叶子从缓冲按偏移裁剪解码。
+ * 独立线程 + deadline 调度。
  */
 #include "variable_def.h"
 #include "monitor_model.h"
@@ -74,6 +74,7 @@ private:
 
     LinkDriver* link_ = nullptr;
     int intervalMs_ = 20;
+    int batchWindowMs_ = 33;            /* POLL 批次送 GUI 的合并窗口, 随采样率调整 */
     std::vector<gs32_mem_region_t> regions_;
     std::vector<LeafSpec> leafSpecs_;
     std::vector<uint8_t>  readBuf_;

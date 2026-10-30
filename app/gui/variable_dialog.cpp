@@ -2,12 +2,14 @@
 #include "symbols/elf_parser.h"
 #include "symbols/svd_parser.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
 #include <QHeaderView>
+#include <QSignalBlocker>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -18,7 +20,7 @@
 #include <functional>
 
 namespace {   /* 与 VariableDialog 私有枚举一致 */
-enum { ColName = 0, ColAddr = 1, ColSize = 2, ColType = 3, ColDraw = 4 };
+enum { ColName = 0, ColAddr = 1, ColSize = 2, ColType = 3 };
 
 /* 名称比较: 字母从小到大; 同一字母小写优先于大写(如 a<A, ab<Ab) */
 static int charRank(QChar c) {
@@ -91,21 +93,7 @@ public:
     }
 };
 
-/* 绘制列: 复选框在单元格内水平居中 */
-class CheckCenterDelegate : public QStyledItemDelegate {
-public:
-    explicit CheckCenterDelegate(QObject* parent = nullptr)
-        : QStyledItemDelegate(parent) {}
-    void paint(QPainter* p, const QStyleOptionViewItem& opt,
-               const QModelIndex& idx) const override {
-        QStyleOptionViewItem o = opt;
-        initStyleOption(&o, idx);
-        o.decorationPosition = QStyleOptionViewItem::Right;   /* 图标区放右侧 */
-        o.decorationAlignment = Qt::AlignCenter;
-        QStyledItemDelegate::paint(p, o, idx);
-    }
-};
-}
+} // namespace
 
 VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle("变量选择");
@@ -120,8 +108,8 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
     lay->addWidget(search_);
 
     tree_ = new QTreeWidget(this);
-    tree_->setColumnCount(5);
-    tree_->setHeaderLabels({"变量", "地址", "大小", "类型", "波形"});
+    tree_->setColumnCount(4);
+    tree_->setHeaderLabels({"变量", "地址", "大小", "类型"});
     tree_->setAlternatingRowColors(true);   /* 表格交替行色 */
     tree_->header()->setSectionResizeMode(QHeaderView::Interactive);
     tree_->header()->setDefaultAlignment(Qt::AlignCenter);   /* 表头居中 */
@@ -132,12 +120,11 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
     tree_->setColumnWidth(ColAddr, 100);
     tree_->setColumnWidth(ColSize, 80);
     tree_->setColumnWidth(ColType, 200);
-    tree_->setColumnWidth(ColDraw, 80);
+    tree_->header()->setSectionResizeMode(ColName, QHeaderView::Stretch);
     tree_->header()->setStretchLastSection(false);
-    /* 地址/大小列内容居中; 绘制列复选框居中 */
+    /* 地址/大小列内容居中 */
     tree_->setItemDelegateForColumn(ColAddr, new AlignCenterDelegate(tree_));
     tree_->setItemDelegateForColumn(ColSize, new AlignCenterDelegate(tree_));
-    tree_->setItemDelegateForColumn(ColDraw, new CheckCenterDelegate(tree_));
     /* 内建排序会递归重排/翻转结构体成员, 禁用;
      * 改为表头点击只排顶层(文件根下), 成员保持定义顺序(地址从小到大) */
     tree_->setSortingEnabled(false);
@@ -146,40 +133,16 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
     connect(tree_->header(), &QHeaderView::sortIndicatorChanged,
             this, &VariableDialog::onSortByColumn);
     connect(tree_, &QTreeWidget::itemChanged, this, &VariableDialog::onItemChanged);
-    /* 右键直接加入/移出波形, 作为「波形」列之外的第二入口 */
+    /* 右键只负责监控开关; 波形选择统一在监控表颜色列完成 */
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         auto* it = tree_->itemAt(pos);
-        if (!it) return;
+        if (!it || !(it->flags() & Qt::ItemIsUserCheckable)) return;
         QMenu menu(this);
-        if (it->childCount() == 0 && (it->flags() & Qt::ItemIsUserCheckable)) {
-            const bool drawn = it->checkState(ColDraw) == Qt::Checked;
-            menu.addAction(drawn ? "从波形移除" : "添加到波形", this, [it, drawn] {
-                it->setCheckState(ColDraw, drawn ? Qt::Unchecked : Qt::Checked);
-            });
-        } else if (it->childCount() > 0) {
-            auto setDraw = [](QTreeWidgetItem* n, bool on, auto&& self) -> void {
-                if (n->childCount() == 0) {
-                    if (n->flags() & Qt::ItemIsUserCheckable)
-                        n->setCheckState(ColDraw, on ? Qt::Checked : Qt::Unchecked);
-                } else {
-                    for (int i = 0; i < n->childCount(); ++i)
-                        self(n->child(i), on, self);
-                }
-            };
-            menu.addAction("整组加入波形", this, [it, setDraw] {
-                setDraw(it, true, setDraw);
-            });
-            menu.addAction("整组移出波形", this, [it, setDraw] {
-                setDraw(it, false, setDraw);
-            });
-        }
-        if (it->flags() & Qt::ItemIsUserCheckable) {
-            const bool mon = it->checkState(ColName) == Qt::Checked;
-            menu.addAction(mon ? "取消监控" : "监控", this, [it, mon] {
-                it->setCheckState(ColName, mon ? Qt::Unchecked : Qt::Checked);
-            });
-        }
+        const bool mon = it->checkState(ColName) == Qt::Checked;
+        menu.addAction(mon ? "取消监控" : "监控", this, [it, mon] {
+            it->setCheckState(ColName, mon ? Qt::Unchecked : Qt::Checked);
+        });
         menu.exec(tree_->viewport()->mapToGlobal(pos));
     });
     tree_->setItemDelegate(new FileGroupDelegate(tree_));   /* 源文件分组整行绘制 */
@@ -187,43 +150,20 @@ VariableDialog::VariableDialog(QWidget* parent) : QDialog(parent) {
 
     auto* row = new QHBoxLayout();
     auto* add = new QPushButton("添加…", this);
-    auto* del = new QPushButton("删除", this);
-    auto* collapse = new QPushButton("折叠变量", this);
-    auto* expand = new QPushButton("展开变量", this);
     add->setFixedSize(100, 30);
-    del->setFixedSize(100, 30);
-    collapse->setFixedSize(100, 30);
-    expand->setFixedSize(100, 30);
     auto* menu = new QMenu(add);
     menu->addAction(QStringLiteral("从 ELF 导入变量…"), this, &VariableDialog::onImportElf);
     menu->addAction(QStringLiteral("从 SVD 导入寄存器…"), this, &VariableDialog::onImportSvd);
     add->setMenu(menu);
-    connect(del, &QPushButton::clicked, this, &VariableDialog::onRemoveSelected);
-    /* 折叠/展开变量节点: ELF 根与源文件分组行保持展开,
-     * 只收起/展开分组下的变量(结构体)节点及其子树 */
-    auto applyVarExpand = [this](bool expanded) {
-        for (int t = 0; t < tree_->topLevelItemCount(); ++t) {
-            auto* fileRoot = tree_->topLevelItem(t);
-            for (int i = 0; i < fileRoot->childCount(); ++i) {
-                auto* g = fileRoot->child(i);
-                if (g->data(ColName, Qt::UserRole + 1).toInt() == 1) {
-                    for (int k = 0; k < g->childCount(); ++k)
-                        g->child(k)->setExpanded(expanded);
-                } else {
-                    g->setExpanded(expanded);   /* 文件根下直接挂的变量 */
-                }
-            }
-        }
-    };
-    connect(collapse, &QPushButton::clicked, this, [applyVarExpand] { applyVarExpand(false); });
-    connect(expand, &QPushButton::clicked, this, [applyVarExpand] { applyVarExpand(true); });
     row->addWidget(add);
-    row->addWidget(del);
-    row->addSpacing(20);            /* 折叠/展开与删除按钮隔开 20px */
-    row->addWidget(collapse);
-    row->addWidget(expand);
     row->addStretch(1);
     lay->addLayout(row);
+
+    /* 重新编译后检测导入的 ELF 是否变化; 用户可选择更新/自动更新 */
+    autoReloadElf_ = QSettings().value("vars/elfAutoReload", false).toBool();
+    elfTimer_.setInterval(1500);
+    connect(&elfTimer_, &QTimer::timeout, this, &VariableDialog::checkElfChanged);
+    elfTimer_.start();
 }
 
 void VariableDialog::sortTopLevel(int column, Qt::SortOrder order) {
@@ -307,7 +247,6 @@ void VariableDialog::addLeafItem(QTreeWidgetItem* parent, const VariableDef& v) 
     it->setData(ColName, Qt::UserRole, QVariant::fromValue(v));
     it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
     it->setCheckState(ColName, Qt::Unchecked);   /* 节点勾选=监控 */
-    it->setCheckState(ColDraw, Qt::Unchecked);   /* 绘制列(仅叶子) */
     it->setText(ColAddr, "0x" + QString::number(v.addr, 16).rightJustified(8, '0').toUpper());
     it->setText(ColSize, QString::number(v.size));
     it->setText(ColType, v.bitOffset >= 0
@@ -354,47 +293,47 @@ static QString nodePath(QTreeWidgetItem* it) {
     return parts.join('.');
 }
 
-void VariableDialog::onItemChanged(QTreeWidgetItem* item, int col) {
-    /* 把子树中已勾「绘制」的叶子发出来(在监控添加后同步绘制列表) */
-    auto leafDef = [](QTreeWidgetItem* it) -> VariableDef {
-        return it->data(ColName, Qt::UserRole).value<VariableDef>();
-    };
-    std::function<void(QTreeWidgetItem*)> emitDrawnLeaves =
-        [this, &emitDrawnLeaves, &leafDef](QTreeWidgetItem* it) {
-        if (it->childCount() == 0) {
-            if (it->checkState(ColDraw) == Qt::Checked)
-                emit displayToggled(leafDef(it), true);
-            return;
-        }
+void VariableDialog::uncheckMonitored(const QString& path) {
+    if (!tree_ || path.isEmpty()) return;
+    std::function<QTreeWidgetItem*(QTreeWidgetItem*)> find =
+        [&](QTreeWidgetItem* it) -> QTreeWidgetItem* {
+        if (nodePath(it) == path) return it;
         for (int i = 0; i < it->childCount(); ++i)
-            emitDrawnLeaves(it->child(i));
+            if (auto* hit = find(it->child(i))) return hit;
+        return nullptr;
     };
+    QTreeWidgetItem* target = nullptr;
+    for (int t = 0; t < tree_->topLevelItemCount() && !target; ++t)
+        target = find(tree_->topLevelItem(t));
+    if (!target) return;
+    /* 只同步 UI, 不再发 monitorRemoved(模型已经从监控表移除) */
+    QSignalBlocker block(tree_);
+    setSubtreeChecked(target, Qt::Unchecked);
+}
 
-    if (col == ColName) {
-        const bool checked = item->checkState(ColName) == Qt::Checked;
-        if (item->childCount() > 0) {
-            tree_->blockSignals(true);
-            setSubtreeChecked(item, checked ? Qt::Checked : Qt::Unchecked);
-            tree_->blockSignals(false);
-            if (checked) {
-                emit monitorAdded(toDwarf(item));   /* 整块监控 */
-                emitDrawnLeaves(item);              /* 已勾绘制的成员同步进绘制列表 */
-            } else {
-                emit monitorRemoved(nodePath(item));
-            }
-        } else {
-            if (checked) {
-                emit monitorAdded(toDwarf(item));
-                if (item->checkState(ColDraw) == Qt::Checked)
-                    emit displayToggled(leafDef(item), true);
-            } else {
-                emit monitorRemoved(nodePath(item));
-            }
-        }
-    } else if (col == ColDraw && item->childCount() == 0) {
-        /* 仅影响绘制列表, 与监控互不相关 */
-        emit displayToggled(leafDef(item),
-                            item->checkState(ColDraw) == Qt::Checked);
+void VariableDialog::clearMonitoredChecks() {
+    if (!tree_) return;
+    QSignalBlocker block(tree_);
+    std::function<void(QTreeWidgetItem*)> clear = [&](QTreeWidgetItem* it) {
+        it->setCheckState(ColName, Qt::Unchecked);
+        for (int i = 0; i < it->childCount(); ++i) clear(it->child(i));
+    };
+    for (int t = 0; t < tree_->topLevelItemCount(); ++t)
+        clear(tree_->topLevelItem(t));
+}
+
+void VariableDialog::onItemChanged(QTreeWidgetItem* item, int col) {
+    if (col != ColName || !item) return;
+    const bool checked = item->checkState(ColName) == Qt::Checked;
+    if (item->childCount() > 0) {
+        tree_->blockSignals(true);
+        setSubtreeChecked(item, checked ? Qt::Checked : Qt::Unchecked);
+        tree_->blockSignals(false);
+        if (checked) emit monitorAdded(toDwarf(item));   /* 整块监控 */
+        else emit monitorRemoved(nodePath(item));
+    } else {
+        if (checked) emit monitorAdded(toDwarf(item));
+        else emit monitorRemoved(nodePath(item));
     }
 }
 
@@ -405,32 +344,165 @@ void VariableDialog::onImportElf() {
     importElfFile(path);
 }
 
-/* 导入 ELF(DWARF 优先, symtab 兜底); interactive=false 供启动恢复静默跳过 */
+static bool isElfRoot(QTreeWidgetItem* it) {
+    return it && it->data(0, Qt::UserRole + 4).toString() == QLatin1String("elf");
+}
+
+QStringList VariableDialog::collectElfCheckedPaths() const {
+    QStringList out;
+    std::function<void(QTreeWidgetItem*, bool)> walk =
+        [&](QTreeWidgetItem* it, bool parentChecked) {
+        const bool checked = it->checkState(ColName) == Qt::Checked;
+        if (checked && !parentChecked) out << nodePath(it);
+        for (int i = 0; i < it->childCount(); ++i)
+            walk(it->child(i), parentChecked || checked);
+    };
+    for (int t = 0; t < tree_->topLevelItemCount(); ++t)
+        if (isElfRoot(tree_->topLevelItem(t)))
+            walk(tree_->topLevelItem(t), false);
+    return out;
+}
+
+void VariableDialog::removeElfRoots(QStringList* checkedPaths) {
+    QStringList paths;
+    for (int t = tree_->topLevelItemCount() - 1; t >= 0; --t) {
+        QTreeWidgetItem* root = tree_->topLevelItem(t);
+        if (!isElfRoot(root)) continue;
+        std::function<void(QTreeWidgetItem*, bool)> walk =
+            [&](QTreeWidgetItem* it, bool parentChecked) {
+            const bool checked = it->checkState(ColName) == Qt::Checked;
+            if (checked && !parentChecked) paths << nodePath(it);
+            for (int i = 0; i < it->childCount(); ++i)
+                walk(it->child(i), parentChecked || checked);
+        };
+        walk(root, false);
+        tree_->takeTopLevelItem(t);
+        delete root;
+    }
+    /* 树节点已删除, 再通知模型移除旧根; 只发最上层勾选项 */
+    for (const QString& p : paths) emit monitorRemoved(p);
+    if (checkedPaths) *checkedPaths = paths;
+}
+
+void VariableDialog::recheckPaths(const QStringList& paths) {
+    if (paths.isEmpty()) return;
+    QHash<QString, QTreeWidgetItem*> byPath;
+    std::function<void(QTreeWidgetItem*)> index = [&](QTreeWidgetItem* it) {
+        byPath.insert(nodePath(it), it);
+        for (int i = 0; i < it->childCount(); ++i) index(it->child(i));
+    };
+    for (int t = 0; t < tree_->topLevelItemCount(); ++t)
+        index(tree_->topLevelItem(t));
+    for (const QString& p : paths) {
+        if (auto* it = byPath.value(p, nullptr)) {
+            if (it->flags() & Qt::ItemIsUserCheckable)
+                it->setCheckState(ColName, Qt::Checked);
+        }
+    }
+}
+
+void VariableDialog::updateElfSignature() {
+    QFileInfo fi(elfPath_);
+    if (fi.exists() && fi.isFile()) {
+        elfMtime_ = fi.lastModified().toMSecsSinceEpoch();
+        elfSize_ = fi.size();
+    } else {
+        elfMtime_ = 0;
+        elfSize_ = -1;
+    }
+}
+
+bool VariableDialog::reloadElfFile(const QString& path) {
+    return importElfFile(path, false);
+}
+
+void VariableDialog::checkElfChanged() {
+    if (elfPath_.isEmpty() || reloadingElf_ || elfPromptOpen_) return;
+    QFileInfo fi(elfPath_);
+    if (!fi.exists() || !fi.isFile()) return;
+    const qint64 mtime = fi.lastModified().toMSecsSinceEpoch();
+    const qint64 size = fi.size();
+    if (mtime == elfMtime_ && size == elfSize_) return;
+    /* 先更新签名, 避免用户选择"否"后每 1.5s 重复弹窗 */
+    elfMtime_ = mtime;
+    elfSize_ = size;
+
+    if (autoReloadElf_) {
+        reloadElfFile(elfPath_);
+        return;
+    }
+
+    elfPromptOpen_ = true;
+    QMessageBox box(this);
+    box.setWindowTitle("ELF 已更新");
+    box.setIcon(QMessageBox::Question);
+    box.setText(QStringLiteral("检测到导入的 ELF 文件已变化：\n%1\n\n是否重新加载变量？")
+                    .arg(elfPath_));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    box.setDefaultButton(QMessageBox::Yes);
+    if (auto* yes = box.button(QMessageBox::Yes)) yes->setText("是");
+    if (auto* no = box.button(QMessageBox::No)) no->setText("否");
+    auto* autoBox = new QCheckBox("不再提示，后续自动更新", &box);
+    box.setCheckBox(autoBox);
+    const int ret = box.exec();
+    elfPromptOpen_ = false;
+    if (autoBox->isChecked()) {
+        autoReloadElf_ = true;
+        QSettings().setValue("vars/elfAutoReload", true);
+    }
+    if (ret == QMessageBox::Yes)
+        reloadElfFile(elfPath_);
+}
+
+/* 导入 ELF(DWARF 优先, symtab 兜底); 只保留一个 ELF,
+ * 重新导入/重新编译时覆盖旧 ELF, 并保留同名变量的勾选状态。 */
 bool VariableDialog::importElfFile(const QString& path, bool interactive) {
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return false;
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (interactive) QMessageBox::warning(this, "导入失败", "无法读取: " + path);
+        return false;
+    }
     const QByteArray elf = f.readAll();
     f.close();
 
-    auto* root = ensureFileRoot(QFileInfo(path).fileName());
+    /* 先完整解析, 解析失败时不动现有 ELF, 避免编译中间文件把变量表清空 */
+    QVector<DwarfVar> dvars;
+    QVector<ElfSymbol> syms;
+    QString parseErr;
+    const bool hasDwarf = DwarfParser::parse(elf, dvars) && !dvars.isEmpty();
+    if (!hasDwarf) {
+        if (!ElfParser::parse(path, syms, &parseErr)) {
+            if (interactive) QMessageBox::warning(this, "导入失败", parseErr);
+            return false;
+        }
+    }
+
+    emit elfReloadStarted();
+    reloadingElf_ = true;
+    QStringList recheck;
+    removeElfRoots(&recheck);
+
+    auto* root = ensureFileRoot(path);
+    root->setText(ColName, path);                               /* 只显示 ELF 路径 */
+    root->setToolTip(ColName, path);
     root->setData(ColName, Qt::UserRole + 3, path);             /* 完整路径(持久化) */
     root->setData(ColName, Qt::UserRole + 4, QStringLiteral("elf"));
+    root->setFirstColumnSpanned(true);
     tree_->blockSignals(true);
-    QVector<DwarfVar> dvars;
-    if (DwarfParser::parse(elf, dvars) && !dvars.isEmpty()) {
+    if (hasDwarf) {
         /* 源文件分组: ELF 根 → 源文件(含路径) → 变量 */
         QHash<QString, QTreeWidgetItem*> fileNodes;
-        auto fileNode = [&](const QString& f) -> QTreeWidgetItem* {
-            const QString key = f.isEmpty() ? "(未知)" : f;   /* 完整路径作唯一分组 key */
+        auto fileNode = [&](const QString& fname) -> QTreeWidgetItem* {
+            const QString key = fname.isEmpty() ? "(未知)" : fname;
             if (QTreeWidgetItem* e = fileNodes.value(key, nullptr)) return e;
             auto* n = new QTreeWidgetItem(root);
-            n->setText(ColName, key);                          /* 整行显示相对路径 */
-            n->setToolTip(ColName, key);                       /* 悬停看完整路径 */
-            n->setData(ColName, Qt::UserRole + 1, 1);          /* 分组标记(排序用) */
-            n->setData(ColName, Qt::UserRole + 2, true);       /* 分组标记(delegate 用) */
-            n->setFirstColumnSpanned(true);                    /* 跨整行, 其他列留空 */
-            n->setForeground(ColName, QColor(0x0B, 0x57, 0xD0));   /* 文件路径深蓝色 */
-            n->setSizeHint(0, QSize(0, n->sizeHint(0).height() + 4));   /* 行高 +4px */
+            n->setText(ColName, key);
+            n->setToolTip(ColName, key);
+            n->setData(ColName, Qt::UserRole + 1, 1);
+            n->setData(ColName, Qt::UserRole + 2, true);
+            n->setFirstColumnSpanned(true);
+            n->setForeground(ColName, QColor(0x0B, 0x57, 0xD0));
+            n->setSizeHint(0, QSize(0, n->sizeHint(0).height() + 4));
             fileNodes.insert(key, n);
             return n;
         };
@@ -444,23 +516,22 @@ bool VariableDialog::importElfFile(const QString& path, bool interactive) {
             it->setData(ColName, Qt::UserRole, QVariant::fromValue(d));
             it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
             it->setCheckState(ColName, Qt::Unchecked);
-            it->setText(ColAddr, "0x" + QString::number(v.addr, 16).rightJustified(8, '0').toUpper());  /* 基地址 */
+            it->setText(ColAddr, "0x" + QString::number(v.addr, 16).rightJustified(8, '0').toUpper());
             if (v.isArray) {
-                const bool isPage = v.name.contains("..");   /* 分页分组节点 */
+                const bool isPage = v.name.contains("..");
                 if (isPage) {
-                    it->setText(ColAddr, QString());         /* 分组不显示地址 */
-                    it->setText(ColType, QString());         /* 分组不显示类型 */
+                    it->setText(ColAddr, QString());
+                    it->setText(ColType, QString());
                 } else {
-                    it->setText(ColSize, QString::number(v.size));   /* 数组总大小 */
+                    it->setText(ColSize, QString::number(v.size));
                     it->setText(ColType, v.typeText.isEmpty() ? "数组" : v.typeText);
                 }
-                for (const auto& m : v.members) addNode(it, m);   /* 数组元素 */
+                for (const auto& m : v.members) addNode(it, m);
             } else if (v.isStruct) {
-                it->setText(ColSize, QString::number(v.size));   /* 结构体总大小 */
+                it->setText(ColSize, QString::number(v.size));
                 it->setText(ColType, "struct");
-                for (const auto& m : v.members) addNode(it, m);   /* 成员按定义顺序 */
+                for (const auto& m : v.members) addNode(it, m);
             } else {
-                it->setCheckState(ColDraw, Qt::Unchecked);
                 it->setText(ColSize, QString::number(v.size));
                 it->setText(ColType, v.bitOffset >= 0
                     ? QString("%1:%2").arg(typeName(v.type)).arg(v.bitWidth)
@@ -473,52 +544,48 @@ bool VariableDialog::importElfFile(const QString& path, bool interactive) {
         };
         for (const auto& v : dvars) addNode(fileNode(v.file), v);
     } else {
-                QVector<ElfSymbol> syms;
-                QString err;
-                if (!ElfParser::parse(path, syms, &err)) {
-                    if (interactive) QMessageBox::warning(this, "导入失败", err);
-                    tree_->blockSignals(false);
-                    return false;
-                }
-                /* symtab 兜底无源文件信息, 归入 "(未知)" 分组 */
-                auto* unk = new QTreeWidgetItem(root);
-                unk->setText(ColName, "(未知)");
-                unk->setData(ColName, Qt::UserRole + 1, 1);
-                unk->setData(ColName, Qt::UserRole + 2, true);
-                unk->setFirstColumnSpanned(true);
-                unk->setForeground(ColName, QColor(0x0B, 0x57, 0xD0));   /* 文件路径深蓝色 */
-                unk->setSizeHint(0, QSize(0, unk->sizeHint(0).height() + 4));   /* 行高 +4px */
-                for (const auto& s : syms) {
-                    VariableDef v;
-                    v.name = s.name; v.addr = s.addr; v.size = s.size;
-                    switch (s.size) {
-                    case 1: v.type = VariableDef::Uint8;  break;
-                    case 2: v.type = VariableDef::Uint16; break;
-                    default: v.type = VariableDef::Uint32; break;
-                    }
-                    addLeafItem(unk, v);
-                }
+        auto* unk = new QTreeWidgetItem(root);
+        unk->setText(ColName, "(未知)");
+        unk->setData(ColName, Qt::UserRole + 1, 1);
+        unk->setData(ColName, Qt::UserRole + 2, true);
+        unk->setFirstColumnSpanned(true);
+        unk->setForeground(ColName, QColor(0x0B, 0x57, 0xD0));
+        unk->setSizeHint(0, QSize(0, unk->sizeHint(0).height() + 4));
+        for (const auto& s : syms) {
+            VariableDef v;
+            v.name = s.name; v.addr = s.addr; v.size = s.size;
+            switch (s.size) {
+            case 1: v.type = VariableDef::Uint8;  break;
+            case 2: v.type = VariableDef::Uint16; break;
+            default: v.type = VariableDef::Uint32; break;
             }
-            tree_->blockSignals(false);
-        /* 用户没点过排序时, 默认名称列升序; 点过则沿用用户选择。
-         * 排序规则不变: 顶层按列排序, 结构体成员保持定义顺序 */
-        QHeaderView* hdr = tree_->header();
-        const int sec = userSorted_ ? hdr->sortIndicatorSection() : int(ColName);
-        const auto ord = userSorted_ ? hdr->sortIndicatorOrder() : Qt::AscendingOrder;
-        if (!userSorted_) {
-            tree_->blockSignals(true);
-            hdr->setSortIndicator(sec, ord);   /* 只更新指示图标, 不触发重排 */
-            tree_->blockSignals(false);
+            addLeafItem(unk, v);
         }
-        sortTopLevel(sec, ord);
-        tree_->collapseAll();
-        root->setExpanded(true);
-        /* 展开源文件分组节点, 变量(结构体)节点保持折叠 */
-        for (int i = 0; i < root->childCount(); ++i) {
-            auto* g = root->child(i);
-            if (g->data(ColName, Qt::UserRole + 1).toInt() == 1)
-                g->setExpanded(true);
-        }
+    }
+    tree_->blockSignals(false);
+
+    QHeaderView* hdr = tree_->header();
+    const int sec = userSorted_ ? hdr->sortIndicatorSection() : int(ColName);
+    const auto ord = userSorted_ ? hdr->sortIndicatorOrder() : Qt::AscendingOrder;
+    if (!userSorted_) {
+        tree_->blockSignals(true);
+        hdr->setSortIndicator(sec, ord);
+        tree_->blockSignals(false);
+    }
+    sortTopLevel(sec, ord);
+    tree_->collapseAll();
+    root->setExpanded(true);
+    for (int i = 0; i < root->childCount(); ++i) {
+        auto* g = root->child(i);
+        if (g->data(ColName, Qt::UserRole + 1).toInt() == 1)
+            g->setExpanded(true);
+    }
+
+    elfPath_ = path;
+    updateElfSignature();
+    reloadingElf_ = false;
+    recheckPaths(recheck);
+    emit elfReloadFinished();
     return true;
 }
 
@@ -611,29 +678,31 @@ void VariableDialog::saveState(QSettings& s) const {
         (r->data(ColName, Qt::UserRole + 4).toString() == "svd" ? svdFiles : elfFiles) << path;
     }
     s.setValue("vars/elfFiles", elfFiles);
+    s.setValue("vars/elfFile", elfFiles.isEmpty() ? QString() : elfFiles.first());
     s.setValue("vars/svdFiles", svdFiles);
 
     /* 勾选状态: 只记最顶层被勾的节点(父勾选即覆盖子), 恢复时重放勾选动作 */
-    QStringList mon, draw;
+    QStringList mon;
     std::function<void(QTreeWidgetItem*, bool)> walk =
         [&](QTreeWidgetItem* it, bool parentChecked) {
         const bool checked = it->checkState(ColName) == Qt::Checked;
         if (checked && !parentChecked) mon << nodePath(it);
-        if (it->childCount() == 0 && it->checkState(ColDraw) == Qt::Checked)
-            draw << nodePath(it);
         for (int i = 0; i < it->childCount(); ++i)
             walk(it->child(i), parentChecked || checked);
     };
     for (int t = 0; t < tree_->topLevelItemCount(); ++t)
         walk(tree_->topLevelItem(t), false);
     s.setValue("vars/monitored", mon);
-    s.setValue("vars/drawn", draw);
 }
 
 void VariableDialog::restoreState(QSettings& s) {
-    /* 重导入上次会话的文件(静默: 文件不存在/解析失败则跳过) */
-    for (const QString& p : s.value("vars/elfFiles").toStringList())
-        importElfFile(p, false);
+    /* 只恢复一个 ELF(新格式 vars/elfFile; 旧格式列表取最后一个) */
+    QString elfPath = s.value("vars/elfFile").toString();
+    if (elfPath.isEmpty()) {
+        const QStringList old = s.value("vars/elfFiles").toStringList();
+        if (!old.isEmpty()) elfPath = old.last();
+    }
+    if (!elfPath.isEmpty()) importElfFile(elfPath, false);
     for (const QString& p : s.value("vars/svdFiles").toStringList())
         importSvdFile(p, false);
     if (tree_->topLevelItemCount() == 0) return;
@@ -652,9 +721,6 @@ void VariableDialog::restoreState(QSettings& s) {
     for (const QString& p : s.value("vars/monitored").toStringList())
         if (auto* it = byPath.value(p, nullptr))
             it->setCheckState(ColName, Qt::Checked);
-    for (const QString& p : s.value("vars/drawn").toStringList())
-        if (auto* it = byPath.value(p, nullptr))
-            it->setCheckState(ColDraw, Qt::Checked);
 }
 
 void VariableDialog::onRemoveSelected() {
@@ -672,11 +738,8 @@ void VariableDialog::onRemoveSelected() {
 
     std::function<void(QTreeWidgetItem*)> notify = [&](QTreeWidgetItem* it) {
         const VariableDef d = it->data(ColName, Qt::UserRole).value<VariableDef>();
-        if (!d.name.isEmpty()) {
+        if (!d.name.isEmpty())
             emit monitorRemoved(d.name);            /* 整根移除(名称匹配的根) */
-            if (it->childCount() == 0)
-                emit displayToggled(d, false);      /* 叶子同时移出绘制集 */
-        }
         for (int i = 0; i < it->childCount(); ++i) notify(it->child(i));
     };
     for (auto* it : tops) notify(it);

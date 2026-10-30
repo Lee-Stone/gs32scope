@@ -17,6 +17,7 @@
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QSettings>
+#include <QShortcut>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QLabel>
@@ -82,6 +83,10 @@ MainWindow::MainWindow() {
     connect(model_, &MonitorModel::changed, this, &MainWindow::onModelChanged);
     connect(model_, &MonitorModel::leafShownChanged,
             this, &MainWindow::onLeafShownChanged);
+    connect(model_, &MonitorModel::leafColorChanged, this, [this](int) {
+        monDock_->rebuild();
+        syncPlotChannels();
+    });
     connect(model_, &MonitorModel::leavesShownChanged, this, [this] {
         syncPlotChannels();
     });
@@ -92,8 +97,10 @@ MainWindow::MainWindow() {
             this, &MainWindow::onMonitorAdded);
     connect(varDialog_, &VariableDialog::monitorRemoved,
             this, &MainWindow::onMonitorRemoved);
-    connect(varDialog_, &VariableDialog::displayToggled,
-            this, &MainWindow::onDisplayToggled);
+    connect(varDialog_, &VariableDialog::elfReloadStarted,
+            this, &MainWindow::onElfReloadStarted);
+    connect(varDialog_, &VariableDialog::elfReloadFinished,
+            this, &MainWindow::onElfReloadFinished);
 
     /* 恢复上次会话: 工具栏参数 + 变量对话框(重导入文件 + 重放勾选)。
      * 首次启动(未完成过正常关闭)保持空白仪表盘/波形; 正常关闭后写入 initialized. */
@@ -169,13 +176,16 @@ MainWindow::MainWindow() {
     connect(&uiTimer_, &QTimer::timeout, this, &MainWindow::onUiTick);
     uiTimer_.start();
 
-    plotTimer_.setInterval(33);   /* 30fps: 绘图与批次/采样率解耦 */
+    plotTimer_.setInterval(33);
     connect(&plotTimer_, &QTimer::timeout, this, [this] {
         if (plot_->hasData()) plot_->replot();
     });
     plotTimer_.start();
+    connect(intervalSpin_, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int) { updatePlotRefreshRate(); });
 
     setStatus("就绪 - 选择后端并连接; 点「导入变量…」选择监控变量");
+    updatePlotRefreshRate();
 }
 
 /* ---------------- UI / 主题 ---------------- */
@@ -217,7 +227,7 @@ QString makeStyleSheet(bool dark) {
     q += "QComboBox,QSpinBox,QLineEdit{background:" + panel + ";color:" + text + ";border:1px solid " +
          border2 + ";border-radius:4px;padding:3px 8px;min-height:22px;font-size:14px;}";
     q += "QComboBox{padding-right:24px;}";
-    q += "QSpinBox#intervalSpin{padding-right:0px;}";
+    q += "QSpinBox#intervalSpin{padding-left:0px;padding-right:0px;}";
     q += "QSpinBox#intervalSpin::up-button,QSpinBox#intervalSpin::down-button{width:0px;height:0px;border:none;background:transparent;}";
     q += "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:24px;"
          "background:" + spinBtn + ";border-left:1px solid " + border2 +
@@ -378,22 +388,6 @@ MainWindow::~MainWindow() {
 }
 
 /* setupUi 之后的代码侧收尾: 控件指针绑定/动态内容/代码专属属性 */
-/* 目标下拉: 重扫 FTDI 端口列表; 当前选择仍在列表中则保留, 否则默认第一个 */
-void MainWindow::refreshPortList() {
-    const QString cur = ui->deviceBox->currentText();
-    const QStringList ports = LinkDriver::scanPorts(QStringLiteral("gslink"));
-    ui->deviceBox->blockSignals(true);
-    ui->deviceBox->clear();
-    if (ports.isEmpty()) {
-        ui->deviceBox->addItem(QStringLiteral("(未发现端口)"));
-    } else {
-        ui->deviceBox->addItems(ports);
-        const int idx = ports.indexOf(cur);
-        ui->deviceBox->setCurrentIndex(idx >= 0 ? idx : 0);
-    }
-    ui->deviceBox->blockSignals(false);
-}
-
 void MainWindow::buildUi() {
     backendBox_ = ui->backendBox;
     intervalSpin_ = ui->intervalSpin;
@@ -430,10 +424,6 @@ void MainWindow::buildUi() {
     }
 
     /* 四块停靠面板: 波形+仪表盘(上排等宽) / 监控+日志(下排等宽) */
-    /* 目标下拉=扫描到的端口: 启动刷新+默认第一个; 每次展开下拉时重新刷新 */
-    refreshPortList();
-    connect(ui->deviceBox, &ComboBox::popupAboutToShow,
-            this, &MainWindow::refreshPortList);
 
     plot_ = new PlotWidget(this);
     dashboard_ = new DashboardWidget(this);
@@ -511,8 +501,11 @@ void MainWindow::buildUi() {
     actSimDemo_ = new QAction("仿真演示", this);
     actCsv_ = new QAction("导出 CSV", this);
     actClear_ = new QAction("清空波形", this);
-    actCsv_->setShortcut(QKeySequence("Ctrl+Shift+E"));
-    actClear_->setShortcut(QKeySequence("Ctrl+Shift+L"));
+    /* 快捷键保留功能但不显示在菜单里 */
+    auto* shortcutCsv = new QShortcut(QKeySequence("Ctrl+Shift+E"), this);
+    connect(shortcutCsv, &QShortcut::activated, this, &MainWindow::onExportCsv);
+    auto* shortcutClear = new QShortcut(QKeySequence("Ctrl+Shift+L"), this);
+    connect(shortcutClear, &QShortcut::activated, this, &MainWindow::onClearPlot);
     ui->mainToolBar->addSeparator();
     ui->mainToolBar->addAction(actSimDemo_);
     connect(actSimDemo_, &QAction::triggered, this, &MainWindow::onSimDemo);
@@ -521,7 +514,21 @@ void MainWindow::buildUi() {
 
     auto* dataMenu = menuBar()->addMenu("数据(&D)");
     dataMenu->addAction(actCsv_);
+    dataMenu->addSeparator();
+    dataMenu->addAction("清空变量", this, [this] {
+        plot_->clearData();
+        history_.clear();
+        timelineStarted_ = false;
+        timelineRawBaseNs_ = timelineLogicalBaseNs_ = lastLogicalNs_ = 0;
+        model_->clear();
+        varDialog_->clearMonitoredChecks();
+        setStatus("已清空监控变量");
+    });
     dataMenu->addAction(actClear_);
+    dataMenu->addAction("清空组件", this, [this] {
+        dashboard_->clearAll();
+        setStatus("已清空仪表盘组件");
+    });
     auto* viewMenu = menuBar()->addMenu("视图(&V)");
     auto addDockToggle = [viewMenu](QDockWidget* dock) {
         if (!dock) return;
@@ -641,6 +648,8 @@ void MainWindow::onConnectClicked() {
     link_.setLogHandler([this](const QString& s) {
         const QString line = s.trimmed();
         if (line.isEmpty()) return;
+        /* DMI 每次访问都打印会以 kHz 级别刷日志, 拖垮 GUI; 只保留 init/error 级别 */
+        if (line.startsWith("[dmi")) return;
         QMetaObject::invokeMethod(this, [this, line]() { appendLog(line); },
                                   Qt::QueuedConnection);
     });
@@ -665,11 +674,8 @@ void MainWindow::onConnectClicked() {
         }
         bExtra = sciConfigToJson(sciCfg);
     }
-    /* 目标下拉框: RV32 → riscv32(驱动内部识别名) */
-    const QString devText = ui->deviceBox->currentText();
+    /* 目标固定 RV32 → 驱动内部识别名 riscv32 */
     const QByteArray bDevice = QByteArrayLiteral("riscv32");
-    if (backend == "gslink" && !devText.isEmpty() && !devText.startsWith("("))
-        bExtra = QString("{\"port\":\"%1\"}").arg(devText).toUtf8();
     const QByteArray bIf = backend == "gslink" ? QByteArray("jtag")
                          : (backend == "sci" ? QByteArray("serial")
                          : (backend == "can" ? QByteArray("can") : QByteArray("swd")));
@@ -684,6 +690,7 @@ void MainWindow::onConnectClicked() {
     /* 新连接 = 新会话时间轴, 清空旧波形/历史 */
     plot_->clearData();
     history_.clear();
+    model_->resetStats();
     timelineStarted_ = false;
     timelineRawBaseNs_ = timelineLogicalBaseNs_ = lastLogicalNs_ = 0;
     actConn_->setEnabled(false); actDisc_->setEnabled(true);
@@ -713,6 +720,14 @@ void MainWindow::onDisconnectClicked() {
 /* ---------------- 采样(单按钮: 开始采样 ⇄ 停止采样) ---------------- */
 int MainWindow::rateHz() const {
     return std::clamp(intervalSpin_->value(), 1, 10000);
+}
+
+/* 波形刷新跟随采样率: 低频按采样周期刷新, 高频封顶约 60fps.
+ * 1kHz -> 16ms; 50Hz -> 20ms; 10Hz -> 100ms; 1Hz -> 1s. */
+void MainWindow::updatePlotRefreshRate() {
+    const int hz = rateHz();
+    const int ms = hz <= 60 ? int(std::lround(1000.0 / hz)) : 16;
+    plotTimer_.setInterval(std::clamp(ms, 16, 1000));
 }
 
 /* 采样率 <= 1kHz 走 POLL(1ms 粒度); >1kHz 必须具备 STREAM 能力的后端 */
@@ -894,18 +909,12 @@ void MainWindow::onMonitorRemoved(const QString& rootPath) {
         if (model_->root(i).name == rootPath) { model_->removeRoot(i); return; }
 }
 
-void MainWindow::onDisplayToggled(const VariableDef& d, bool on) {
-    int li = model_->leafIndexByPath(d.name);
-    if (on) {
-        if (li < 0) li = model_->addDrawOnlyRoot(d);   /* 独立绘制: 不进监控列表 */
-        if (li >= 0) model_->setLeafShown(li, true);
-    } else if (li >= 0) {
-        model_->setLeafShown(li, false);
-    }
-}
-
 void MainWindow::onRemoveRoot(int rootIdx) {
+    if (rootIdx < 0 || rootIdx >= model_->rootCount()) return;
+    const QString rootPath = model_->root(rootIdx).name;
     model_->removeRoot(rootIdx);
+    /* 监控表按根移除后, 导入变量表格同步取消勾选 */
+    if (varDialog_) varDialog_->uncheckMonitored(rootPath);
 }
 
 /* ---------------- 模型 -> 界面 ---------------- */
@@ -924,10 +933,51 @@ void MainWindow::onLeafShownChanged(int) {
 
 /* 移除已不存在的叶子的历史, 防止长期运行内存增长 */
 void MainWindow::pruneHistory() {
+    if (elfReloading_) return;   /* ELF 重载过程中路径会短暂消失, 结束后再清 */
     for (auto it = history_.begin(); it != history_.end();) {
         if (model_->leafIndexByPath(it.key()) < 0) it = history_.erase(it);
         else ++it;
     }
+}
+
+/* ELF 重新导入时, 快照波形/HEX/颜色, 重新加载后按变量名恢复 */
+void MainWindow::onElfReloadStarted() {
+    elfUiState_.clear();
+    for (int i = 0; i < model_->leafCount(); ++i) {
+        const auto& lf = model_->leaf(i);
+        ElfLeafState st;
+        st.shown = lf.shown;
+        st.hex = lf.hex;
+        st.color = lf.color;
+        st.addr = lf.def.addr;
+        elfUiState_.insert(lf.path, st);
+    }
+    elfReloading_ = true;
+}
+
+void MainWindow::onElfReloadFinished() {
+    elfReloading_ = false;
+    for (auto it = elfUiState_.constBegin(); it != elfUiState_.constEnd(); ++it) {
+        const int li = model_->leafIndexByPath(it.key());
+        if (li < 0) continue;
+        const ElfLeafState& st = it.value();
+        const auto& lf = model_->leaf(li);
+        if (st.addr != lf.def.addr) {
+            /* 地址变了, 旧历史和旧曲线不再可信 */
+            history_.remove(it.key());
+            if (plot_->hasChannel(it.key())) plot_->removeChannel(it.key());
+        }
+        if (lf.shown != st.shown) model_->setLeafShown(li, st.shown);
+        if (lf.hex != st.hex) model_->setLeafHex(li, st.hex);
+        if (st.color.isValid() && lf.color != st.color)
+            model_->setLeafColor(li, st.color);
+    }
+    elfUiState_.clear();
+    pruneHistory();
+    monDock_->rebuild();
+    syncPlotChannels();
+    reconfigureEngine();
+    updateStartAction();
 }
 
 /* 会话叶子: 除 ELF/SVD 重导入外, 也持久化仿真/绘制专用等扁平变量 */
@@ -945,6 +995,8 @@ void MainWindow::saveSessionLeaves(QSettings& s) const {
         s.setValue("bitWidth", lf.def.bitWidth);
         s.setValue("monitored", lf.monitored);
         s.setValue("shown", lf.shown);
+        s.setValue("hex", lf.hex);
+        s.setValue("color", lf.color.name(QColor::HexRgb));
     }
     s.endArray();
 }
@@ -963,6 +1015,8 @@ void MainWindow::restoreSessionLeaves(QSettings& s) {
         d.bitWidth = s.value("bitWidth").toInt();
         const bool monitored = s.value("monitored", true).toBool();
         const bool shown = s.value("shown", false).toBool();
+        bool hex = s.value("hex", false).toBool();
+        const QColor savedColor(s.value("color").toString());
         int li = model_->leafIndexByPath(d.name);
         if (li >= 0) {
             if (model_->leaf(li).monitored != monitored)
@@ -975,7 +1029,13 @@ void MainWindow::restoreSessionLeaves(QSettings& s) {
             if (li >= 0 && shown) model_->setLeafShown(li, true);
         } else if (shown) {
             model_->addDrawOnlyRoot(d);   /* 默认 shown=true */
+            li = model_->leafIndexByPath(d.name);
         }
+        if (li >= 0 && model_->leaf(li).hex != hex)
+            model_->setLeafHex(li, hex);
+        if (li >= 0 && savedColor.isValid() &&
+            model_->leaf(li).color != savedColor)
+            model_->setLeafColor(li, savedColor);
     }
     s.endArray();
 }
@@ -987,12 +1047,12 @@ void MainWindow::syncPlotChannels() {
         if (lf.shown) {
             want.insert(lf.path);
             if (!plot_->hasChannel(lf.path)) {
-                plot_->addChannel(lf.path, model_->root(lf.rootIdx).color);
+                plot_->addChannel(lf.path, lf.color);
                 /* 加入显示集时回放已经采到的历史 */
                 if (history_.contains(lf.path))
                     plot_->setChannelData(lf.path, history_.value(lf.path));
             } else {
-                plot_->setChannelColor(lf.path, model_->root(lf.rootIdx).color);
+                plot_->setChannelColor(lf.path, lf.color);
             }
         }
     }
@@ -1046,7 +1106,7 @@ void MainWindow::onBatchReady(const SampleBatch& batch) {
             plot_->appendBatch(lf.path, pts);
     }
     plot_->trimBefore(tNow);
-    /* 实际重绘由 plotTimer_(30fps) 完成, 避免按批次频率重绘 */
+    /* 实际重绘由 plotTimer_ 完成, 其周期随采样率调整 */
 }
 
 void MainWindow::onStats(const EngineStats& st) {

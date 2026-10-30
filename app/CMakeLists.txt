@@ -20,7 +20,6 @@ add_executable(GS32Scope WIN32
     gui/dashboard_widget.cpp
     gui/variable_dialog.cpp
     gui/monitor_dock.cpp
-    gui/display_list.cpp
     gui/write_dialog.cpp
     symbols/elf_parser.cpp
     symbols/svd_parser.cpp

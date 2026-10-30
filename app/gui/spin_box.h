@@ -28,9 +28,9 @@ public:
         connect(up_, &QToolButton::clicked, this, &QSpinBox::stepUp);
         connect(down_, &QToolButton::clicked, this, &QSpinBox::stepDown);
         if (auto* le = lineEdit()) {
-            /* QSpinBox 会把编辑区缩到左侧(原生按钮位); 手动铺满, 数字按整框居中 */
+            /* 编辑区铺满控件; 文本与其他下拉框一致靠左, 右侧留给上下按钮 */
             le->setStyleSheet(QStringLiteral("padding:0px;background:transparent;border:none;"));
-            le->setAlignment(Qt::AlignCenter);
+            le->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         }
     }
 

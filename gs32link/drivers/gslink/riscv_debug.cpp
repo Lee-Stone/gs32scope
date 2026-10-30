@@ -81,7 +81,7 @@ int RiscvDebug::dmiAccess(uint8_t op, uint32_t addr, uint32_t data, uint32_t* ou
 int RiscvDebug::dmiWriteReg(uint32_t addr, uint32_t data) {
     int rc = dmiAccess(DMI_OP_WRITE, addr, data, nullptr);
     if (rc == GS32_ERR_LOST) return rc;
-    logInfo("[dmi W] addr=0x%02X data=0x%08X%s\n", addr, data,
+    logDbg("[dmi W] addr=0x%02X data=0x%08X%s\n", addr, data,
             rc != DMI_OP_NOP ? " (FAILED/BUSY)" : "");
     return GS32_OK;
 }
@@ -96,7 +96,7 @@ int RiscvDebug::dmiReadReg(uint32_t addr, uint32_t* data) {
             if (rc == GS32_ERR_LOST) return rc;
             if (rc == DMI_OP_NOP) {
                 *data = v;
-                logInfo("[dmi R] addr=0x%02X data=0x%08X (nop#%d try#%d)\n",
+                logDbg("[dmi R] addr=0x%02X data=0x%08X (nop#%d try#%d)\n",
                         addr, v, i, attempt);
                 return GS32_OK;
             }
@@ -399,21 +399,27 @@ int RiscvDebug::ensureReady() {
                 (int)((st >> 9) & 1), (int)((st >> 22) & 1));
     }
     /* 配置 SBA: sbreadonaddr=1 + 32bit 访问(整个连接生命周期只需一次) */
-    /* 在线示波器要求目标运行: hart 处于暂停(残留调试态/异常 ebreak)时自动恢复,
-     * 否则计数类变量全部冻结为常数, 采样无意义 */
-    if (st & (1u << 9)) {   /* allhalted(bit9); bit10/11 是 resumeack, 不是 halted */
-        /* 目标暂停时尝试一次标准恢复; 恢复不了(固件崩溃/复位挂起)不强求,
-         * 采样仍可进行(值冻结), 日志提示用户重启板子 */
-        logInfo("[init] hart halted, resuming...\n");
-        dmiWriteReg(DM_DMCONTROL, DMCONTROL_DMACTIVE | (1u << 30));   /* resumereq */
+    /* 在线示波器要求目标运行: 残留调试暂停或系统复位后自动恢复.
+     * 只检查 allhalted 不够: 关闭上一次调试会话后目标可能处于
+     * havereset(核被复位但 allhalted=0), 变量会全部冻结为 0.
+     * ackhavereset(bit28) 清复位标志, resumereq(bit30) 让核继续跑. */
+    const bool allHalted = (st & (1u << 9)) != 0;
+    const bool hasReset  = (st & (1u << 22)) != 0;
+    if (allHalted || hasReset) {
+        logInfo("[init] hart %s, resuming...\n",
+                allHalted ? "halted" : "in reset");
+        uint32_t ctl = DMCONTROL_DMACTIVE | (1u << 30);   /* resumereq */
+        if (hasReset) ctl |= (1u << 28);                  /* ackhavereset */
+        dmiWriteReg(DM_DMCONTROL, ctl);
         uint32_t s2 = 0;
         for (int i = 0; i < 32; ++i) {
             if (dmiReadReg(DM_DMSTATUS, &s2)) { s2 = 0xDEADDEAD; break; }
-            if (!(s2 & (1u << 9))) break;
+            if (!(s2 & (1u << 9)) && !(s2 & (1u << 22))) break;
         }
         logInfo("[init] resume result dmstatus=0x%08X%s\n", s2,
-                (s2 & (1u << 9)) ? " (STILL HALTED - values may be frozen, power-cycle the board)"
-                                 : " (running)");
+                ((s2 & (1u << 9)) || (s2 & (1u << 22)))
+                    ? " (STILL HALTED/RESET - values may be frozen, power-cycle the board)"
+                    : " (running)");
     }
     if (sbaConfigure()) {
         logInfo("[init] SBA configure FAILED\n");
@@ -561,7 +567,7 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
     for (const auto& rec : recs) {
         const unsigned resp = rec.tdo[0] & 3;
         if (resp) {
-            logInfo("[sba-multi] DMI resp=%u, disable burst + fallback slow path\n", resp);
+            logDbg("[sba-multi] DMI resp=%u, disable burst + fallback slow path\n", resp);
             autoInc_ = false;
             sbWaitIdle();   /* 先等飞行中的坏地址访问落地, 否则清错后错误又置上 */
             curSbAccess_ = -1;
@@ -603,7 +609,7 @@ int RiscvDebug::readRegions(const MemRegion* regs, uint32_t count, uint8_t* out)
         const uint32_t cs = (uint32_t)(n >> 2);
         const int sberr = (cs >> SBCS_SBERROR_SHIFT) & 7;
         if (sberr || (cs & (1u << 22))) {
-            logInfo("[sba-multi] sberror=%d sbbusyerror=%d after burst, "
+            logDbg("[sba-multi] sberror=%d sbbusyerror=%d after burst, "
                     "clear + fallback slow path\n", sberr, (int)((cs >> 22) & 1));
             /* 检出即关突发: 慢路径仍带 autoincrement+readondata 会反复投机越界读 */
             autoInc_ = false;

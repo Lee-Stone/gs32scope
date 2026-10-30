@@ -165,6 +165,10 @@ void PlotWidget::clearData() {
     displayT_ = 0.0;
     displayInit_ = false;
     dataPoints_ = 0;
+    /* 新连接/清空后回到自动跟随和默认量程 */
+    userZoomed_ = false;
+    manualY_ = false;
+    windowSec_ = 5.0;
     replot();
 }
 
@@ -209,7 +213,11 @@ void PlotWidget::updateYRange() {
 }
 
 void PlotWidget::replot() {
-    if (!userZoomed_) {
+    if (userZoomed_) {
+        /* 记住用户手动缩放后的 X 半窗宽; 双击恢复跟随时沿用这个宽度 */
+        const double span = plot_->xAxis->range().size();
+        if (span > 1e-9) windowSec_ = span / 2.0;
+    } else {
         /* 跟随最新样本: 显示位置向 lastT_ 平滑逼近, 避免 30fps 下按批跳动 */
         if (!displayInit_ || std::abs(lastT_ - displayT_) > 2.0) {
             displayT_ = lastT_;
@@ -233,8 +241,11 @@ bool PlotWidget::hasChannel(const QString& name) const {
 bool PlotWidget::eventFilter(QObject* obj, QEvent* ev) {
     if (obj == plot_) {
         if (ev->type() == QEvent::MouseButtonDblClick) {
+            /* 双击恢复 X 自动跟随, 但保留用户手动设置的范围:
+             * X 沿用当前跨度, Y 保持 manualY_ 不重置. */
+            const double span = plot_->xAxis->range().size();
+            if (span > 1e-9) windowSec_ = span / 2.0;
             userZoomed_ = false;
-            manualY_ = false;   /* 双击恢复跟随 + 默认量程 */
             displayInit_ = false;
             replot();
             return true;

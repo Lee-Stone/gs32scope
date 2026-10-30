@@ -25,7 +25,6 @@ SOURCES += \
     gui/dashboard_widget.cpp \
     gui/variable_dialog.cpp \
     gui/monitor_dock.cpp \
-    gui/display_list.cpp \
     gui/write_dialog.cpp \
     symbols/elf_parser.cpp \
     symbols/svd_parser.cpp \
@@ -45,7 +44,6 @@ HEADERS += \
     gui/dashboard_widget.h \
     gui/variable_dialog.h \
     gui/monitor_dock.h \
-    gui/display_list.h \
     gui/write_dialog.h \
     gui/symbol_item.h \
     link/link_driver.h \

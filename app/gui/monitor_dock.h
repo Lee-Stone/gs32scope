@@ -31,7 +31,7 @@ private slots:
 
 private:
     enum { ColDraw = 0, ColName = 1, ColType = 2, ColAddr = 3, ColSize = 4,
-           ColVal = 5, ColMax = 6, ColMin = 7, ColAvg = 8 };
+           ColVal = 5, ColMax = 6, ColMin = 7 };
     void applyShown(QTreeWidgetItem* item, bool on);
     int  leafState(QTreeWidgetItem* item, int& total) const;   /* 返回已显示叶子数 */
 

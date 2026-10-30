@@ -81,12 +81,7 @@
     </property>
     <item>
      <property name="text">
-      <string>GS32F0039A</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>GS32F00137H</string>
+      <string>RV32</string>
      </property>
     </item>
    </widget>

@@ -82,6 +82,9 @@ bool D2xxApi::load(std::string& err) {
         FreeLibrary(mod); mod = nullptr;
         return false;
     }
+    /* 可选符号: 老版本 D2XX 没有也不影响打开 */
+    SetLatencyTimer = reinterpret_cast<FT_STATUS (WINAPI*)(FT_HANDLE, unsigned char)>(
+        GetProcAddress(mod, "FT_SetLatencyTimer"));
     return true;
 }
 
@@ -123,6 +126,10 @@ bool FtdiJtag::open(uint32_t speed_khz, const char* port, std::string& err) {
         return false;
     }
     logInfo("[open] FT_Open OK (port=%s)\n", (port && *port) ? port : "0");
+    /* USB 批量事务的 latency timer 决定小读写往返延迟. 默认 16ms 会把
+     * 1kHz 轮询压到几十 Hz; 统一设为 1ms. 老 D2XX 无此符号时跳过. */
+    if (api_.SetLatencyTimer && api_.SetLatencyTimer(ft_, 1) != FT_OK)
+        logInfo("[open] FT_SetLatencyTimer(1ms) failed\n");
     if (api_.ResetDevice(ft_) != FT_OK ||
         api_.Purge(ft_, FT_PURGE_RX | FT_PURGE_TX) != FT_OK ||
         api_.SetTimeouts(ft_, 2000, 2000) != FT_OK ||
@@ -137,7 +144,9 @@ bool FtdiJtag::open(uint32_t speed_khz, const char* port, std::string& err) {
                        ? 0 : (30000 + speed_khz - 1) / speed_khz - 1;
     const uint8_t mpsseCfg[] = {
         0x85, 0x8A,
-        0x80, 0x0A, 0x0B,   /* data=0x0A: TMS(AD3)=1, TDI(AD1)=1(空闲高), dir=0x0B */
+        /* AD5 = nSRST(OpenOCD 同款 FTDI 板定义), 必须输出高释放目标复位;
+         * 只配 AD0/1/3 会让复位脚悬空, 关闭上一次会话后核一直停在 reset. */
+        0x80, 0x2A, 0x2B,   /* data: TMS/TDI/nSRST 高; dir: AD0,AD1,AD3,AD5 输出 */
         0x86, (uint8_t)(div & 0xFF), (uint8_t)(div >> 8),
         0x87,
     };

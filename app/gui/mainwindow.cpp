@@ -15,6 +15,7 @@
 #include <QGuiApplication>
 #include <QHash>
 #include <QInputDialog>
+#include <QIntValidator>
 #include <QKeySequence>
 #include <QSettings>
 #include <QShortcut>
@@ -42,7 +43,7 @@
 #endif
 
 namespace {
-/* "tcp:127.0.0.1:7000" / "COM3@115200" / 原始 JSON -> 驱动 extra JSON */
+/* "tcp:127.0.0.1:7000" / "COM3@750000" / 原始 JSON -> 驱动 extra JSON */
 QByteArray sciConfigToJson(const QString& text) {
     const QString t = text.trimmed();
     if (t.startsWith('{')) return t.toUtf8();
@@ -55,13 +56,13 @@ QByteArray sciConfigToJson(const QString& text) {
         return QString("{\"transport\":\"tcp\",\"host\":\"%1\",\"port\":%2}")
             .arg(host).arg(port).toUtf8();
     }
-    QString com = t, baud = QStringLiteral("115200");
+    QString com = t, baud = QStringLiteral("750000");
     const int at = t.indexOf('@');
     if (at > 0) { com = t.left(at).trimmed(); baud = t.mid(at + 1).trimmed(); }
     bool ok = false;
     const int b = baud.toInt(&ok);
     return QString("{\"transport\":\"serial\",\"com\":\"%1\",\"baud\":%2}")
-        .arg(com).arg(ok && b > 0 ? b : 115200).toUtf8();
+        .arg(com).arg(ok && b > 0 ? b : 750000).toUtf8();
 }
 
 /* 枚举本机串口: QueryDosDevice 列出的 COMx 设备(含虚拟串口) */
@@ -189,7 +190,8 @@ MainWindow::MainWindow() {
         if (themeMode_ == "system") applyTheme("system");
     });
 
-    /* --import <elf|svd>: 启动时静默导入并监控全部顶层变量/外设 */
+    /* --import <elf|svd>: 启动时静默导入符号库, 默认不勾选任何监控。
+     * 自动化需要"全部监控"时显式加 --monitor-all。 */
     {
         const QStringList args = QApplication::arguments();
         const int ii = args.indexOf("--import");
@@ -200,8 +202,9 @@ MainWindow::MainWindow() {
             const bool ok = isSvd ? varDialog_->importSvd(path)
                                   : varDialog_->importElf(path);
             if (ok) {
-                varDialog_->monitorAll();
-                setStatus("已导入并监控: " + path);
+                const bool monitorAll = args.contains("--monitor-all");
+                if (monitorAll) varDialog_->monitorAll();
+                setStatus((monitorAll ? "已导入并监控: " : "已导入: ") + path);
             } else {
                 setStatus("导入失败: " + path, true);
             }
@@ -608,6 +611,9 @@ void MainWindow::buildUi() {
                        static_cast<QWidget*>(ui->tckBox)}) {
         w->setFixedHeight(kCtlH);
     }
+    /* 允许直接输入非列表波特率/TCK */
+    ui->tckBox->setEditable(true);
+    ui->tckBox->setValidator(new QIntValidator(1, 10000000, ui->tckBox));
     /* 下拉框按内容调整首选宽度, 避免把工具栏按钮挤进扩展菜单 */
     for (QComboBox* cb : {static_cast<QComboBox*>(backendBox_),
                           static_cast<QComboBox*>(ui->deviceBox),
@@ -667,10 +673,11 @@ void MainWindow::applyBackendUi(const QString& backend) {
     QSignalBlocker block(ui->tckBox);
     ui->tckBox->clear();
     if (uart) {
-        for (int b : {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600})
+        for (int b : {9600, 19200, 38400, 57600, 115200, 230400, 460800,
+                      750000, 921600, 1500000})
             ui->tckBox->addItem(QString::number(b));
         int idx = ui->tckBox->findText(keep);
-        if (idx < 0) idx = ui->tckBox->findText(QStringLiteral("115200"));
+        if (idx < 0) idx = ui->tckBox->findText(QStringLiteral("750000"));
         ui->tckBox->setCurrentIndex(idx >= 0 ? idx : 0);
     } else {
         for (int m : {1, 2, 4, 8, 16}) ui->tckBox->addItem(QString::number(m));
@@ -779,7 +786,7 @@ void MainWindow::onConnectClicked() {
                     setStatus("未选择串口: 请连接设备后重新展开「目标」下拉", true);
                     return;
                 }
-                sciCfg = QString("%1@%2").arg(com).arg(baud > 0 ? baud : 115200);
+                sciCfg = QString("%1@%2").arg(com).arg(baud > 0 ? baud : 750000);
             } else {
                 sciCfg = QStringLiteral("tcp:127.0.0.1:7001");
             }
@@ -797,7 +804,7 @@ void MainWindow::onConnectClicked() {
     cfg.extra = bExtra.isEmpty() ? nullptr : bExtra.constData();
     const auto* tck = findChild<QComboBox*>("tckBox");
     if (backend == "sci")   /* Uart: 第二组参数是波特率, 不是 kHz */
-        cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt()) : 115200;
+        cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt()) : 750000;
     else
         cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt() * 1000) : 4000;
     if (!link_.open(cfg)) { setStatus("连接失败: " + link_.lastErrorText(), true); link_.close(); return; }
@@ -812,14 +819,16 @@ void MainWindow::onConnectClicked() {
     setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/TCK, 采样率未采样时仍可调 */
     updateStartAction();   /* 连续/单次采样按钮同条件使能 */
     statusConn_->setText("已连接: " + backendBox_->currentText());
+    QString connText = backendBox_->currentText();
     if (backend == "sci") {
         const QString envCfg = qEnvironmentVariable("GS32SCOPE_SCI_CONFIG");
         const QString where = envCfg.isEmpty()
             ? ui->deviceBox->currentText() + " @ " + ui->tckBox->currentText()
             : envCfg;
         statusConn_->setText("已连接: Uart (" + where + ")");
+        connText = "Uart (" + where + ")";
     }
-    setStatus(QString("已连接 %1").arg(backendBox_->currentText()));
+    setStatus("已连接 " + connText);
 }
 
 void MainWindow::onDisconnectClicked() {

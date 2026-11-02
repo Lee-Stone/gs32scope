@@ -89,6 +89,69 @@
    <addaction name="actConn"/>
    <addaction name="actDisc"/>
    <addaction name="separator"/>
+   <widget class="QLabel" name="labelTck">
+    <property name="text">
+     <string> 波特率: </string>
+    </property>
+   </widget>
+   <widget class="ComboBox" name="tckBox">
+    <property name="minimumSize">
+     <size>
+      <width>100</width>
+      <height>30</height>
+     </size>
+    </property>
+    <property name="maximumSize">
+     <size>
+      <width>100</width>
+      <height>30</height>
+     </size>
+    </property>
+    <property name="currentIndex">
+     <number>4</number>
+    </property>
+    <item>
+     <property name="text">
+      <string>9600</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>19200</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>38400</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>57600</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>115200</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>230400</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>460800</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>921600</string>
+     </property>
+    </item>
+   </widget>
+   <addaction name="separator"/>
    <widget class="QLabel" name="labelInterval">
     <property name="text">
      <string> 采样率(Hz): </string>
@@ -107,54 +170,6 @@
     <property name="value">
      <number>50</number>
     </property>
-   </widget>
-   <addaction name="separator"/>
-   <widget class="QLabel" name="labelTck">
-    <property name="text">
-     <string> TCK(MHz): </string>
-    </property>
-   </widget>
-   <widget class="ComboBox" name="tckBox">
-    <property name="minimumSize">
-     <size>
-      <width>100</width>
-      <height>30</height>
-     </size>
-    </property>
-    <property name="maximumSize">
-     <size>
-      <width>100</width>
-      <height>30</height>
-     </size>
-    </property>
-    <property name="currentIndex">
-     <number>2</number>
-    </property>
-    <item>
-     <property name="text">
-      <string>1</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>2</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>4</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>8</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>16</string>
-     </property>
-    </item>
    </widget>
    <addaction name="actStart"/>
    <addaction name="actSingle"/>

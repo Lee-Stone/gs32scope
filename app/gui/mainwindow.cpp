@@ -35,6 +35,11 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#undef interface   /* rpcndr.h 把 interface 定义成 struct, 与 gs32_config_t::interface 冲突 */
+#include <cwchar>
+#endif
 
 namespace {
 /* "tcp:127.0.0.1:7000" / "COM3@115200" / 原始 JSON -> 驱动 extra JSON */
@@ -57,6 +62,29 @@ QByteArray sciConfigToJson(const QString& text) {
     const int b = baud.toInt(&ok);
     return QString("{\"transport\":\"serial\",\"com\":\"%1\",\"baud\":%2}")
         .arg(com).arg(ok && b > 0 ? b : 115200).toUtf8();
+}
+
+/* 枚举本机串口: QueryDosDevice 列出的 COMx 设备(含虚拟串口) */
+QStringList availableSerialPorts() {
+    QStringList ports;
+#ifdef Q_OS_WIN
+    wchar_t buf[65536] = {};
+    const DWORD n = QueryDosDeviceW(nullptr, buf, DWORD(sizeof(buf) / sizeof(buf[0])));
+    if (n != 0) {
+        for (const wchar_t* p = buf; *p; p += wcslen(p) + 1) {
+            const QString name = QString::fromWCharArray(p);
+            if (!name.startsWith(QStringLiteral("COM"), Qt::CaseInsensitive)) continue;
+            bool numeric = false;
+            name.mid(3).toInt(&numeric);
+            if (numeric) ports << name;
+        }
+    }
+    ports.removeDuplicates();
+    std::sort(ports.begin(), ports.end(), [](const QString& a, const QString& b) {
+        return a.mid(3).toInt() < b.mid(3).toInt();   /* COM9 在 COM10 前 */
+    });
+#endif
+    return ports;
 }
 } // namespace
 
@@ -114,6 +142,8 @@ MainWindow::MainWindow() {
                 if (backendBox_->itemData(i).toString() == be) {
                     backendBox_->setCurrentIndex(i); break;
                 }
+        /* 先按后端准备好第二组参数(TCK/波特率)与目标列表, 再恢复具体选项 */
+        applyBackendUi(backendBox_->currentData().toString());
         const int di = ui->deviceBox->findText(s.value("toolbar/device").toString());
         if (di >= 0) ui->deviceBox->setCurrentIndex(di);
         int rate = s.value("toolbar/rate", -1).toInt();
@@ -122,6 +152,8 @@ MainWindow::MainWindow() {
             const int ms = s.value("toolbar/interval", 20).toInt();
             rate = std::clamp(ms > 0 ? 1000 / ms : 50, 1, 10000);
         }
+        const int envRate = qEnvironmentVariableIntValue("GS32SCOPE_RATE");
+        if (envRate > 0) rate = envRate;   /* 自动化/测试入口 */
         intervalSpin_->setValue(std::clamp(rate, 1, 10000));
         const int ti = ui->tckBox->findText(s.value("toolbar/tck").toString());
         if (ti >= 0) ui->tckBox->setCurrentIndex(ti);
@@ -412,7 +444,8 @@ void MainWindow::buildUi() {
         backendBox_->addItem("(未找到驱动)");
     } else {
         static const QHash<QString, QString> dispNames{
-            {"gslink", "OpenOCD"},
+            {"gslink", "GS32-Link"},
+            {"sci", "Uart"},
             {"sim", "Simulation"}};
 
         for (const QString& b : backends) {
@@ -421,6 +454,13 @@ void MainWindow::buildUi() {
         }
         const int simIdx = backendBox_->findData("sim");
         if (simIdx >= 0) backendBox_->setCurrentIndex(simIdx);   /* 默认选仿真 */
+
+        /* 切换通讯接口: 立即刷新第二组参数(Uart -> 波特率)与目标(串口)列表 */
+        connect(backendBox_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [this](int) { applyBackendUi(backendBox_->currentData().toString()); });
+        /* 展开"目标"下拉时再枚举一次串口, 插拔设备后无需重启 */
+        connect(ui->deviceBox, &ComboBox::popupAboutToShow,
+                this, &MainWindow::refreshDeviceList);
     }
 
     /* 四块停靠面板: 波形+仪表盘(上排等宽) / 监控+日志(下排等宽) */
@@ -595,6 +635,54 @@ void MainWindow::buildUi() {
     });
 }
 
+/* 第二组参数随后端切换: Uart 用波特率, 其它后端用 TCK */
+void MainWindow::applyBackendUi(const QString& backend) {
+    const bool uart = (backend == "sci");
+    ui->labelTck->setText(uart ? " 波特率: " : " TCK(MHz): ");
+    const QString keep = ui->tckBox->currentText();
+    QSignalBlocker block(ui->tckBox);
+    ui->tckBox->clear();
+    if (uart) {
+        for (int b : {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600})
+            ui->tckBox->addItem(QString::number(b));
+        int idx = ui->tckBox->findText(keep);
+        if (idx < 0) idx = ui->tckBox->findText(QStringLiteral("115200"));
+        ui->tckBox->setCurrentIndex(idx >= 0 ? idx : 0);
+    } else {
+        for (int m : {1, 2, 4, 8, 16}) ui->tckBox->addItem(QString::number(m));
+        int idx = ui->tckBox->findText(keep);
+        if (idx < 0) idx = ui->tckBox->findText(QStringLiteral("4"));
+        ui->tckBox->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    refreshDeviceList();
+}
+
+/* 目标下拉: Uart 时枚举可用串口并默认选第一个; 其它后端固定 RV32 */
+void MainWindow::refreshDeviceList() {
+    const QString backend = backendBox_->currentData().toString();
+    const QString keep = ui->deviceBox->currentText().trimmed();
+
+    if (backend != "sci") {
+        if (ui->deviceBox->count() == 1 &&
+            ui->deviceBox->itemText(0) == QStringLiteral("RV32")) return;
+        QSignalBlocker block(ui->deviceBox);
+        ui->deviceBox->clear();
+        ui->deviceBox->addItem(QStringLiteral("RV32"));
+        return;
+    }
+
+    const QStringList ports = availableSerialPorts();
+    QSignalBlocker block(ui->deviceBox);
+    ui->deviceBox->clear();
+    if (ports.isEmpty()) {
+        ui->deviceBox->addItem(QStringLiteral("(无串口)"));
+        return;
+    }
+    ui->deviceBox->addItems(ports);
+    const int idx = ports.indexOf(keep);
+    ui->deviceBox->setCurrentIndex(idx >= 0 ? idx : 0);
+}
+
 void MainWindow::defaultDockLayout() {
     if (!monDock_ || !plotDock_ || !dashDock_ || !logDock_) return;
     for (QDockWidget* d : std::initializer_list<QDockWidget*>{
@@ -659,18 +747,18 @@ void MainWindow::onConnectClicked() {
     if (backend == "sci" || backend == "can") {
         QString sciCfg = qEnvironmentVariable("GS32SCOPE_SCI_CONFIG");
         if (sciCfg.isEmpty()) {
-            QSettings s;
-            const QString def = backend == "can" ? "tcp:127.0.0.1:7001"
-                                                  : "tcp:127.0.0.1:7000";
-            sciCfg = s.value("toolbar/" + backend + "Config", def).toString();
-            const QString defPort = backend == "can" ? "7001" : "7000";
-            const QString hint = "串口: COM3@115200\nTCP 测试/网关: tcp:127.0.0.1:" + defPort;
-            bool ok = false;
-            sciCfg = QInputDialog::getText(
-                this, backend == "can" ? "CAN 网关配置" : "SCI 配置",
-                hint, QLineEdit::Normal, sciCfg, &ok);
-            if (!ok || sciCfg.trimmed().isEmpty()) return;
-            s.setValue("toolbar/" + backend + "Config", sciCfg.trimmed());
+            if (backend == "sci") {
+                /* Uart: 串口号来自"目标"下拉, 波特率来自第二组参数 */
+                const QString com = ui->deviceBox->currentText().trimmed();
+                const int baud = ui->tckBox->currentText().toInt();
+                if (com.isEmpty() || com.startsWith('(')) {
+                    setStatus("未选择串口: 请连接设备后重新展开「目标」下拉", true);
+                    return;
+                }
+                sciCfg = QString("%1@%2").arg(com).arg(baud > 0 ? baud : 115200);
+            } else {
+                sciCfg = QStringLiteral("tcp:127.0.0.1:7001");
+            }
         }
         bExtra = sciConfigToJson(sciCfg);
     }
@@ -684,7 +772,10 @@ void MainWindow::onConnectClicked() {
     cfg.interface = bIf.constData();
     cfg.extra = bExtra.isEmpty() ? nullptr : bExtra.constData();
     const auto* tck = findChild<QComboBox*>("tckBox");
-    cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt() * 1000) : 4000;
+    if (backend == "sci")   /* Uart: 第二组参数是波特率, 不是 kHz */
+        cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt()) : 115200;
+    else
+        cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt() * 1000) : 4000;
     if (!link_.open(cfg)) { setStatus("连接失败: " + link_.lastErrorText(), true); link_.close(); return; }
     connectedBackend_ = backend;
     /* 新连接 = 新会话时间轴, 清空旧波形/历史 */
@@ -697,6 +788,13 @@ void MainWindow::onConnectClicked() {
     setConnControlsEnabled(false);   /* 连接期间锁定通讯接口/目标/TCK, 采样率未采样时仍可调 */
     updateStartAction();   /* 连续/单次采样按钮同条件使能 */
     statusConn_->setText("已连接: " + backendBox_->currentText());
+    if (backend == "sci") {
+        const QString envCfg = qEnvironmentVariable("GS32SCOPE_SCI_CONFIG");
+        const QString where = envCfg.isEmpty()
+            ? ui->deviceBox->currentText() + " @ " + ui->tckBox->currentText()
+            : envCfg;
+        statusConn_->setText("已连接: Uart (" + where + ")");
+    }
     setStatus(QString("已连接 %1").arg(backendBox_->currentText()));
 }
 
@@ -730,17 +828,20 @@ void MainWindow::updatePlotRefreshRate() {
     plotTimer_.setInterval(std::clamp(ms, 16, 1000));
 }
 
-/* 采样率 <= 1kHz 走 POLL(1ms 粒度); >1kHz 必须具备 STREAM 能力的后端 */
+/* 真实后端优先目标侧 STREAM: 采样率由目标定时器决定, 不受串口往返限制;
+ * Simulation 在低频仍走 POLL, 保持既有演示行为。 */
 bool MainWindow::startSampling(QString* err) {
     const int hz = rateHz();
     const int intervalMs = std::max(1, int(std::lround(1000.0 / hz)));
     engine_->configure(&link_, intervalMs, model_);
+    const bool canStream = link_.hasCap(GS32_CAP_STREAM);
+    if (hz > 1000 && !canStream) {
+        if (err) *err = QStringLiteral("当前后端不支持 %1Hz；高采样率需要 STREAM 后端").arg(hz);
+        return false;
+    }
+    const bool useStream = canStream && (hz > 1000 || connectedBackend_ != "sim");
     bool ok = false;
-    if (hz > 1000) {
-        if (!link_.hasCap(GS32_CAP_STREAM)) {
-            if (err) *err = QStringLiteral("当前后端不支持 %1Hz；10kHz 需要 STREAM 后端").arg(hz);
-            return false;
-        }
+    if (useStream) {
         ok = engine_->startStream(uint32_t(std::llround(1e9 / double(hz))), err);
     } else {
         ok = engine_->start(err);
@@ -772,7 +873,7 @@ void MainWindow::onStartClicked() {
     setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
                   .arg(model_->leafCount())
                   .arg(rateHz())
-                  .arg(rateHz() > 1000 ? "STREAM" : "POLL"));
+                  .arg(engine_->isStreaming() ? "STREAM" : "POLL"));
 }
 
 /* 单次采样: 读取一拍即自动停止; 期间两按钮禁用, 单次按钮显示等待状态 */
@@ -822,7 +923,7 @@ void MainWindow::onEngineStopped() {
             setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
                           .arg(model_->leafCount())
                           .arg(rateHz())
-                          .arg(rateHz() > 1000 ? "STREAM" : "POLL"));
+                          .arg(engine_->isStreaming() ? "STREAM" : "POLL"));
         }
         return;
     }
@@ -1201,6 +1302,9 @@ void MainWindow::onDashboardWrite(const QString& path, double value) {
 
 /* ---------------- 仿真演示 ---------------- */
 void MainWindow::loadSimDemoVariables() {
+    /* 真实后端上 0x2010xxxx 是目标内存(ILM/代码区), 不能伪造变量更不能写入;
+     * 仿真演示变量只在 Simulation 后端加载。 */
+    if (connectedBackend_ != "sim") return;
     struct DemoVar {
         const char* name;
         uint32_t addr;

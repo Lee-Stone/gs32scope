@@ -71,6 +71,9 @@ private:
     void reconfigureEngine();
     void updateStartAction();
     void setConnControlsEnabled(bool on);  /* 通讯接口/目标/采样率/TCK 连接期间禁用 */
+    /* 按后端刷新第二组参数: Uart 显示波特率 + 串口列表, 其它后端显示 TCK */
+    void applyBackendUi(const QString& backend);
+    void refreshDeviceList();              /* 目标下拉: Uart 时枚举可用串口并默认选中 */
     bool startSampling(QString* err);      /* 按采样率选择 POLL 或 STREAM */
     int  rateHz() const;
     void updatePlotRefreshRate();   /* 波形刷新频率跟随采样率 */

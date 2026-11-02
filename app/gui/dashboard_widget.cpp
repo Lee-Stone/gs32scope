@@ -581,16 +581,13 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     add->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(add);
     menu->addAction("数值", this, [this] { addItemInteractive(Kind::Value); });
-    menu->addAction("圆形仪表", this, [this] { addItemInteractive(Kind::Gauge); });
+    menu->addAction("仪表", this, [this] { addItemInteractive(Kind::Gauge); });
     menu->addAction("滑块", this, [this] { addItemInteractive(Kind::Slider); });
     menu->addAction("开关", this, [this] { addItemInteractive(Kind::Toggle); });
     add->setMenu(menu);
-    auto* demo = new QPushButton("电机演示面板", this);
     auto* clear = new QPushButton("清空", this);
-    connect(demo, &QPushButton::clicked, this, &DashboardWidget::createDemoPanel);
     connect(clear, &QPushButton::clicked, this, &DashboardWidget::clearAll);
     bar->addWidget(add);
-    bar->addWidget(demo);
     bar->addWidget(clear);
     bar->addStretch(1);
     root->addLayout(bar);
@@ -604,9 +601,7 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     scroll_->setWidget(canvas_);
     root->addWidget(scroll_, 1);
 
-    emptyHint_ = new QLabel("点击「添加组件」创建数值 / 仪表 / 滑块 / 开关\n"
-                            "或点击「电机演示面板」一键生成电机控制面板",
-                            canvas_);
+    emptyHint_ = new QLabel("点击「添加组件」创建数值 / 仪表 / 滑块 / 开关", canvas_);
     emptyHint_->setAlignment(Qt::AlignCenter);
     emptyHint_->setStyleSheet("background:transparent;border:none;");
     {

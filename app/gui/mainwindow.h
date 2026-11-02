@@ -115,7 +115,6 @@ private:
     QAction*     actSingle_ = nullptr;  /* 单次采样: 一拍即停 */
     QAction*     actCsv_ = nullptr;     /* 导出波形 CSV */
     QAction*     actClear_ = nullptr;   /* 清空波形/历史 */
-    QAction*     actSimDemo_ = nullptr; /* 一键仿真演示 */
     QAction*     themeLight_ = nullptr;
     QAction*     themeDark_ = nullptr;
     QAction*     themeSystem_ = nullptr;

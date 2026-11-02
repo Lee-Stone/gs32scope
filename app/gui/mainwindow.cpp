@@ -134,6 +134,10 @@ MainWindow::MainWindow() {
      * 首次启动(未完成过正常关闭)保持空白仪表盘/波形; 正常关闭后写入 initialized. */
     bool restoredDockState = false;
     {
+        /* --fresh: 自动化测试用, 模拟首次启动(清空已保存会话) */
+        if (QApplication::arguments().contains("--fresh")) {
+            QSettings().clear();
+        }
         QSettings s;
         const bool initialized = s.value("session/initialized", false).toBool();
         const QString be = s.value("toolbar/backend").toString();
@@ -165,7 +169,13 @@ MainWindow::MainWindow() {
             const QByteArray dockState = s.value("window/dockState").toByteArray();
             if (!dockState.isEmpty()) restoredDockState = restoreState(dockState);
         } else {
-            dashboard_->clearAll();   /* 首次启动: 不继承任何仪表盘/波形 */
+            /* 首次启动: 仪表盘/波形/监控变量全部为空, 只记忆用户后续添加的内容 */
+            dashboard_->clearAll();
+            plot_->clearData();
+            history_.clear();
+            model_->clear();
+            timelineStarted_ = false;
+            timelineRawBaseNs_ = timelineLogicalBaseNs_ = lastLogicalNs_ = 0;
         }
         themeMode_ = s.value("appearance/theme", "system").toString();
         applyTheme(themeMode_);
@@ -443,17 +453,21 @@ void MainWindow::buildUi() {
     if (backends.isEmpty()) {
         backendBox_->addItem("(未找到驱动)");
     } else {
-        static const QHash<QString, QString> dispNames{
-            {"gslink", "GS32-Link"},
-            {"sci", "Uart"},
-            {"sim", "Simulation"}};
+        QHash<QString, QString> dispNames{
+            {"gslink", "OpenOCD"},
+            {"sci", "Uart"}};
+        /* Simulation 仅用于内部测试: --demo / --stream 或 GS32SCOPE_ENABLE_SIM */
+        const QStringList appArgs = QApplication::arguments();
+        if (appArgs.contains("--demo") || appArgs.contains("--stream") ||
+            qEnvironmentVariableIsSet("GS32SCOPE_ENABLE_SIM")) {
+            dispNames.insert("sim", "Simulation");
+        }
 
         for (const QString& b : backends) {
             if (!dispNames.contains(b)) continue;
             backendBox_->addItem(dispNames.value(b), b);
         }
-        const int simIdx = backendBox_->findData("sim");
-        if (simIdx >= 0) backendBox_->setCurrentIndex(simIdx);   /* 默认选仿真 */
+        if (backendBox_->count() > 0) backendBox_->setCurrentIndex(0);
 
         /* 切换通讯接口: 立即刷新第二组参数(Uart -> 波特率)与目标(串口)列表 */
         connect(backendBox_, qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -482,7 +496,7 @@ void MainWindow::buildUi() {
     plotDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     plotDock_->setMinimumHeight(480);
 
-    dashDock_ = new QDockWidget("仪表盘", this);
+    dashDock_ = new QDockWidget("组件", this);
     dashDock_->setObjectName("dashDock");
     dashDock_->setMinimumWidth(300);
     dashDock_->setWidget(dashboard_);
@@ -538,7 +552,6 @@ void MainWindow::buildUi() {
     connect(ui->actVar, &QAction::triggered, this, &MainWindow::onOpenVariableDialog);
 
     /* 波形数据操作: 导出 CSV / 清空; 放到菜单里, 避免工具栏拥挤 */
-    actSimDemo_ = new QAction("仿真演示", this);
     actCsv_ = new QAction("导出 CSV", this);
     actClear_ = new QAction("清空波形", this);
     /* 快捷键保留功能但不显示在菜单里 */
@@ -546,9 +559,6 @@ void MainWindow::buildUi() {
     connect(shortcutCsv, &QShortcut::activated, this, &MainWindow::onExportCsv);
     auto* shortcutClear = new QShortcut(QKeySequence("Ctrl+Shift+L"), this);
     connect(shortcutClear, &QShortcut::activated, this, &MainWindow::onClearPlot);
-    ui->mainToolBar->addSeparator();
-    ui->mainToolBar->addAction(actSimDemo_);
-    connect(actSimDemo_, &QAction::triggered, this, &MainWindow::onSimDemo);
     connect(actCsv_, &QAction::triggered, this, &MainWindow::onExportCsv);
     connect(actClear_, &QAction::triggered, this, &MainWindow::onClearPlot);
 
@@ -567,7 +577,7 @@ void MainWindow::buildUi() {
     dataMenu->addAction(actClear_);
     dataMenu->addAction("清空组件", this, [this] {
         dashboard_->clearAll();
-        setStatus("已清空仪表盘组件");
+        setStatus("已清空组件");
     });
     auto* viewMenu = menuBar()->addMenu("视图(&V)");
     auto addDockToggle = [viewMenu](QDockWidget* dock) {
@@ -598,10 +608,24 @@ void MainWindow::buildUi() {
                        static_cast<QWidget*>(ui->tckBox)}) {
         w->setFixedHeight(kCtlH);
     }
-    backendBox_->setFixedWidth(140);
-    ui->deviceBox->setFixedWidth(92);
-    intervalSpin_->setFixedWidth(108);
-    ui->tckBox->setFixedWidth(80);
+    /* 下拉框按内容调整首选宽度, 避免把工具栏按钮挤进扩展菜单 */
+    for (QComboBox* cb : {static_cast<QComboBox*>(backendBox_),
+                          static_cast<QComboBox*>(ui->deviceBox),
+                          static_cast<QComboBox*>(ui->tckBox)}) {
+        cb->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        cb->setMinimumContentsLength(7);
+    }
+    backendBox_->setMinimumWidth(110);
+    ui->deviceBox->setMinimumWidth(110);
+    intervalSpin_->setMinimumWidth(110);
+    ui->tckBox->setMinimumWidth(110);
+    /* 顶部控件填满整条工具栏, 文本完整可见 */
+    for (QWidget* w : {static_cast<QWidget*>(backendBox_),
+                       static_cast<QWidget*>(ui->deviceBox),
+                       static_cast<QWidget*>(intervalSpin_),
+                       static_cast<QWidget*>(ui->tckBox)}) {
+        w->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
     for (QLabel* lb : {ui->labelBackend, ui->labelTarget,
                        ui->labelInterval, ui->labelTck}) {
         lb->setFixedHeight(kCtlH);

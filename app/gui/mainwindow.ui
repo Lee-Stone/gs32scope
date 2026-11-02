@@ -54,12 +54,6 @@
       <height>30</height>
      </size>
     </property>
-    <property name="maximumSize">
-     <size>
-      <width>100</width>
-      <height>30</height>
-     </size>
-    </property>
    </widget>
    <widget class="QLabel" name="labelTarget">
     <property name="text">
@@ -68,12 +62,6 @@
    </widget>
    <widget class="ComboBox" name="deviceBox">
     <property name="minimumSize">
-     <size>
-      <width>100</width>
-      <height>30</height>
-     </size>
-    </property>
-    <property name="maximumSize">
      <size>
       <width>100</width>
       <height>30</height>
@@ -96,12 +84,6 @@
    </widget>
    <widget class="ComboBox" name="tckBox">
     <property name="minimumSize">
-     <size>
-      <width>100</width>
-      <height>30</height>
-     </size>
-    </property>
-    <property name="maximumSize">
      <size>
       <width>100</width>
       <height>30</height>

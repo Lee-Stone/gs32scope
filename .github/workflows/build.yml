@@ -1,0 +1,127 @@
+name: Build GS32Scope
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. V1.0.0)"
+        required: true
+        default: "V1.0.0"
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || 'V1.0.0' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (UCRT64 + Qt6)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-svg
+
+      - name: Build application
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p build-ci
+          cd build-ci
+          qmake ../app/GS32Scope.pro CONFIG+=release
+          mingw32-make -j"$(nproc)"
+
+      - name: Build communication drivers
+        shell: msys2 {0}
+        run: |
+          set -e
+          cd gs32link
+          mingw32-make -B SHELL=cmd.exe -j"$(nproc)"
+          ls -l ../drivers/gs32link_gslink.dll ../drivers/gs32link_sci.dll
+
+      - name: Assemble clean release
+        shell: msys2 {0}
+        run: |
+          set -e
+          DIST="dist/GS32Scope $VERSION"
+          rm -rf dist
+          mkdir -p "$DIST/drivers"
+          cp build-ci/GS32Scope.exe "$DIST/GS32Scope.exe"
+
+          windeployqt --release --compiler-runtime --no-translations \
+            --no-system-d3d-compiler --no-opengl-sw "$DIST/GS32Scope.exe"
+
+          # SVG assets used by the UI
+          mkdir -p "$DIST/imageformats" "$DIST/iconengines"
+          cp "$MINGW_PREFIX/bin/Qt6Svg.dll" "$DIST/" 2>/dev/null || true
+          cp "$MINGW_PREFIX/share/qt6/plugins/imageformats/qsvg.dll" \
+             "$DIST/imageformats/" 2>/dev/null || true
+          cp "$MINGW_PREFIX/share/qt6/plugins/iconengines/qsvgicon.dll" \
+             "$DIST/iconengines/" 2>/dev/null || true
+
+          # Drop modules/plugins the application does not use
+          rm -f "$DIST/Qt6Network.dll"
+          rm -rf "$DIST/tls" "$DIST/networkinformation" "$DIST/generic"
+          rm -rf "$DIST/translations"
+
+          # windeployqt does not copy the UCRT runtime; collect it with ldd
+          (
+            cd "$DIST"
+            for f in GS32Scope.exe Qt6*.dll platforms/*.dll imageformats/*.dll \
+                     iconengines/*.dll styles/*.dll; do
+              ldd "$f" 2>/dev/null || true
+            done | awk '/ucrt64\/bin\// {print $3}' | sort -u | while read -r lib; do
+              cp "$lib" .
+            done
+          )
+
+          cp drivers/gs32link_gslink.dll "$DIST/drivers/"
+          cp drivers/gs32link_sci.dll "$DIST/drivers/"
+
+          cat > "$DIST/README.txt" <<EOF
+          GS32Scope $VERSION
+          通讯接口: OpenOCD / Uart
+          目标侧 SDK 与完整用户手册不随本包提供。
+          EOF
+
+          du -sh "$DIST"
+          find "$DIST" -maxdepth 2 -type f | wc -l
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath "dist/GS32Scope $env:VERSION" -DestinationPath "dist/GS32Scope $env:VERSION.zip" -Force
+          Get-Item "dist/GS32Scope $env:VERSION.zip" | Select-Object FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "GS32Scope-${{ env.VERSION }}"
+          path: "dist/GS32Scope ${{ env.VERSION }}.zip"
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release view "$VERSION" >/dev/null 2>&1 || \
+            gh release create "$VERSION" --title "GS32Scope $VERSION" \
+              --notes "GS32Scope $VERSION"
+          gh release upload "$VERSION" "dist/GS32Scope $VERSION.zip" --clobber

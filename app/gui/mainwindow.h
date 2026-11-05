@@ -26,6 +26,7 @@ class QDockWidget;
 class QPlainTextEdit;
 class VariableDialog;
 class DashboardWidget;
+struct ArrayInfo;
 
 namespace Ui { class MainWindow; }
 
@@ -86,6 +87,8 @@ private:
     void saveSessionLeaves(QSettings& s) const;
     void restoreSessionLeaves(QSettings& s);
     bool writeVariable(const QString& path, double value, bool confirm);
+    bool readArraySnapshot(const ArrayInfo& a, QVector<double>& out, QString* err);
+    void rebuildArrayCatalog();
     void loadSimDemoVariables();
     bool ensureDemoReady();   /* 连接 sim/sci/can、加载演示变量、生成面板 */
     void setStatus(const QString& msg, bool isError = false);

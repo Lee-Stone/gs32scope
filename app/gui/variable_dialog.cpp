@@ -477,6 +477,7 @@ bool VariableDialog::importElfFile(const QString& path, bool interactive) {
         }
     }
 
+    elfVars_ = hasDwarf ? dvars : QVector<DwarfVar>();
     emit elfReloadStarted();
     reloadingElf_ = true;
     QStringList recheck;

@@ -25,6 +25,8 @@ public:
     bool importElf(const QString& path);
     bool importSvd(const QString& path);
     void monitorAll();
+    /* 最近一次 ELF 导入的 DWARF 变量树(供数组组件构建目录) */
+    const QVector<DwarfVar>& elfVars() const { return elfVars_; }
     /* 监控表按根移除时, 同步取消导入表格中的勾选框(不触发二次移除) */
     void uncheckMonitored(const QString& path);
     void clearMonitoredChecks();   /* 数据菜单清空变量时同步取消所有勾选 */
@@ -55,6 +57,7 @@ private:
     QString itemPath(QTreeWidgetItem* it) const;
 
     /* ELF 生命周期: 只保留一个 ELF; 重新导入时保留勾选项, 文件变化时提示 */
+    QVector<DwarfVar> elfVars_;
     QStringList collectElfCheckedPaths() const;
     void removeElfRoots(QStringList* checkedPaths);
     void recheckPaths(const QStringList& paths);

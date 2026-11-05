@@ -23,6 +23,7 @@ SOURCES += \
     gui/mainwindow.cpp \
     gui/plot_widget.cpp \
     gui/dashboard_widget.cpp \
+    gui/array_view.cpp \
     gui/variable_dialog.cpp \
     gui/monitor_dock.cpp \
     gui/write_dialog.cpp \
@@ -42,6 +43,7 @@ HEADERS += \
     gui/spin_box.h \
     gui/plot_widget.h \
     gui/dashboard_widget.h \
+    gui/array_view.h \
     gui/variable_dialog.h \
     gui/monitor_dock.h \
     gui/write_dialog.h \

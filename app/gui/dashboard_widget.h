@@ -5,10 +5,13 @@
  * 组件: 数值(显示+写入) / 圆形仪表 / 滑块 / 开关, 每个组件绑定一个监控变量。
  * 布局可拖动, 退出时通过 QSettings 保存, 启动恢复。
  */
+#include "array_view.h"
 #include <QColor>
 #include <QPoint>
 #include <QVector>
 #include <QWidget>
+#include <functional>
+#include <utility>
 
 class QLabel;
 class QScrollArea;
@@ -20,12 +23,20 @@ class DashboardWidget : public QWidget
 {
     Q_OBJECT
 public:
-    enum class Kind { Value, Gauge, Slider, Toggle, Editor };
+    enum class Kind { Value, Gauge, Slider, Toggle, Editor, Array };
 
     explicit DashboardWidget(QWidget* parent = nullptr);
     ~DashboardWidget() override;
 
     void setMonitorModel(MonitorModel* model) { model_ = model; }
+    /* 数组组件: 符号目录 + 读取回调 + 连接状态 */
+    using ArrayReader = std::function<bool(const ArrayInfo&, QVector<double>&, QString*)>;
+    void setArrayCatalog(const QVector<ArrayInfo>& v) { arrays_ = v; }
+    const QVector<ArrayInfo>& arrayCatalog() const { return arrays_; }
+    void setArrayReader(ArrayReader r);
+    void setArrayLive(bool on);
+    bool arrayLive() const { return arrayLive_; }
+    bool sampleArray(const ArrayInfo& a, QVector<double>& out, QString* err);
     void refresh();
     void saveState(QSettings& s) const;
     void restoreState(QSettings& s);
@@ -46,6 +57,7 @@ private:
     void addItem(Kind kind, const QString& path, const QString& label,
                  double minV, double maxV, const QPoint& pos = QPoint(-1, -1));
     void addItemInteractive(Kind kind);
+    void addArrayItem(const ArrayInfo& a, const QString& label);
     void bindItem(DashboardItem* item);
     void removeItem(DashboardItem* item);
     /* 统一 240x180 单元网格: 自动吸附、禁止重叠 */
@@ -62,6 +74,9 @@ private:
     void clearSnapGuides();
 
     MonitorModel* model_ = nullptr;
+    QVector<ArrayInfo> arrays_;
+    ArrayReader arrayReader_;
+    bool arrayLive_ = false;
     QWidget* canvas_ = nullptr;
     QScrollArea* scroll_ = nullptr;
     QLabel*  emptyHint_ = nullptr;

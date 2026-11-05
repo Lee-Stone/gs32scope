@@ -18,6 +18,8 @@ add_executable(GS32Scope WIN32
     gui/spin_box.h
     gui/plot_widget.cpp
     gui/dashboard_widget.cpp
+    gui/array_view.cpp
+    gui/array_view.h
     gui/variable_dialog.cpp
     gui/monitor_dock.cpp
     gui/write_dialog.cpp

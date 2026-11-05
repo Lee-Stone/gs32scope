@@ -10,6 +10,8 @@
 #include <QDoubleSpinBox>
 #include <QFontMetrics>
 #include <QFormLayout>
+#include <QIcon>
+#include <QPixmap>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -37,6 +39,18 @@
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 
+QIcon makeZoomIcon(const QColor& c) {
+    QPixmap pm(32, 32);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(c, 3));
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(QRectF(7, 7, 15, 15));
+    p.drawLine(QPointF(20.5, 20.5), QPointF(27, 27));
+    return QIcon(pm);
+}
+
 QString fmtNumber(double v, VariableDef::Type t, int bitWidth, int decimals) {
     if (isFloatType(t)) return QString::number(v, 'f', decimals);
     if (bitWidth > 0) {
@@ -60,10 +74,12 @@ class BindDialog : public QDialog
 {
 public:
     BindDialog(MonitorModel* model, DashboardWidget::Kind kind, QWidget* parent,
+               const QVector<ArrayInfo>& arrays = {},
                const QString& curPath = {}, const QString& curLabel = {},
                double curMin = -100.0, double curMax = 100.0)
         : QDialog(parent), kind_(kind) {
-        setWindowTitle("绑定变量");
+        arrays_ = arrays;
+        setWindowTitle("设置");
         setMinimumWidth(420);
         auto* lay = new QVBoxLayout(this);
         auto* form = new QFormLayout();
@@ -79,11 +95,23 @@ public:
             comp->setFilterMode(Qt::MatchContains);
             comp->setCompletionMode(QCompleter::PopupCompletion);
         }
-        if (model) {
+        if (kind == DashboardWidget::Kind::Array) {
+            if (arrays_.isEmpty()) {
+                combo_->addItem(QStringLiteral("(没有可用的数组变量，请先导入 ELF)"),
+                                QString());
+            }
+            for (const auto& a : arrays_) {
+                const QString tt = a.typeText.isEmpty() ? QStringLiteral("数组") : a.typeText;
+                combo_->addItem(QStringLiteral("%1(%2)")
+                                    .arg(a.path, tt),
+                                a.path);
+            }
+        } else if (model) {
             for (int i = 0; i < model->leafCount(); ++i)
                 combo_->addItem(model->leaf(i).path, model->leaf(i).path);
         }
-        if (!curPath.isEmpty() && combo_->findData(curPath) < 0)
+        if (kind != DashboardWidget::Kind::Array &&
+            !curPath.isEmpty() && combo_->findData(curPath) < 0)
             combo_->addItem(curPath, curPath);
         if (!curPath.isEmpty()) {
             const int idx = combo_->findData(curPath);
@@ -117,10 +145,12 @@ public:
         max_->setVisible(rangeVisible);
         if (auto* l = form->labelForField(min_)) l->setVisible(rangeVisible);
         if (auto* l = form->labelForField(max_)) l->setVisible(rangeVisible);
+
         lay->addLayout(form);
 
-        connect(combo_, &QComboBox::currentTextChanged, this, [this](const QString&) {
-            if (label_->text().isEmpty())
+        connect(label_, &QLineEdit::textEdited, this, [this] { labelEdited_ = true; });
+        connect(combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+            if (!labelEdited_)
                 label_->setText(shortVarName(combo_->currentData().toString()));
         });
 
@@ -128,6 +158,10 @@ public:
         box->button(QDialogButtonBox::Ok)->setText("确定");
         box->button(QDialogButtonBox::Cancel)->setText("取消");
         connect(box, &QDialogButtonBox::accepted, this, [this] {
+            if (kind_ == DashboardWidget::Kind::Array && !arrayInfo().isValid()) {
+                QMessageBox::warning(this, "未选择数组", "请选择一个可用的数组变量。");
+                return;
+            }
             if (combo_->currentData().toString().isEmpty()) {
                 QMessageBox::warning(this, "未选择变量", "请选择一个监控变量。");
                 return;
@@ -150,9 +184,17 @@ public:
     double minV() const { return min_->value(); }
     double maxV() const { return max_->value(); }
 
+    ArrayInfo arrayInfo() const {
+        const QString p = combo_->currentData().toString();
+        for (const auto& a : arrays_) if (a.path == p) return a;
+        return ArrayInfo();
+    }
+
 private:
     DashboardWidget::Kind kind_;
+    QVector<ArrayInfo> arrays_;
     QComboBox* combo_ = nullptr;
+    bool labelEdited_ = false;
     QLineEdit* label_ = nullptr;
     QDoubleSpinBox* min_ = nullptr;
     QDoubleSpinBox* max_ = nullptr;
@@ -225,6 +267,21 @@ public:
             connect(apply_, &QPushButton::clicked, this, [this] { applyEdit(); });
             connect(edit_, &QLineEdit::returnPressed, this, [this] { applyEdit(); });
         }
+        if (kind_ == DashboardWidget::Kind::Array) {
+            arrayView_ = new ArrayView(this);
+            arrayView_->setAccent(accent_);
+            arrayView_->setGeometry(10, 28, width() - 20, height() - 36);
+            arrayZoom_ = new QToolButton(this);
+            arrayZoom_->setObjectName("arrayZoom");
+            arrayZoom_->setIcon(makeZoomIcon(palette().color(QPalette::PlaceholderText)));
+            arrayZoom_->setIconSize(QSize(18, 18));
+            arrayZoom_->setAutoRaise(true);
+            arrayZoom_->setToolTip(QStringLiteral("放大数组波形"));
+            arrayZoom_->setGeometry(width() - 46, 4, 32, 24);
+            connect(arrayZoom_, &QToolButton::clicked, this,
+                    [this] { arrayView_->openZoom(); });
+            arrayView_->setMenuHandler([this](const QPoint& p) { showItemMenu(p); });
+        }
     }
 
     static QSize preferredSize(DashboardWidget::Kind) {
@@ -258,6 +315,23 @@ public:
         update();
     }
 
+    void setArrayBinding(const ArrayInfo& a, const QString& label) {
+        array_ = a;
+        path_ = a.path;
+        label_ = label.isEmpty() ? shortVarName(a.path) : label;
+        if (arrayView_) arrayView_->bindArray(a);
+        setToolTip(path_);
+        setAccessibleName(path_);
+        setAccessibleDescription(label_);
+        update();
+    }
+    const ArrayInfo& arrayInfo() const { return array_; }
+    void setArrayLive(bool on) { if (arrayView_) arrayView_->setLive(on); }
+    void refreshArray() { if (arrayView_) arrayView_->updateOnce(); }
+    void setArrayReader(ArrayView::Reader r) {
+        if (arrayView_) arrayView_->setReader(std::move(r));
+    }
+
     void setTileSize(const QSize& s) {
         if (s == size()) return;
         setFixedSize(s);
@@ -265,6 +339,8 @@ public:
             edit_->setGeometry(14, height() - 40, width() - 88, 30);
             apply_->setGeometry(width() - 68, height() - 40, 54, 30);
         }
+        if (arrayView_) arrayView_->setGeometry(10, 28, width() - 20, height() - 36);
+        if (arrayZoom_) arrayZoom_->setGeometry(width() - 46, 4, 32, 24);
         update();
     }
 
@@ -276,6 +352,7 @@ public:
     }
 
     void setValue(double v, const QString& text, bool valid) {
+        if (kind_ == DashboardWidget::Kind::Array) return;
         if (sliderActive_ && kind_ == DashboardWidget::Kind::Slider) return;
         const bool changed = (v != value_) || (text != text_) || (valid != valid_);
         value_ = v;
@@ -312,9 +389,17 @@ protected:
         f.setPointSize(9);
         p.setFont(f);
         p.setPen(palette().color(QPalette::PlaceholderText));
-        const QString title = QFontMetrics(f).elidedText(label_, Qt::ElideRight, width() - 100);
-        p.drawText(QRectF(14, 6, width() - 100, 18), Qt::AlignLeft | Qt::AlignVCenter, title);
+        QString titleText = label_;
+        if (kind_ == DashboardWidget::Kind::Array && array_.isValid()) {
+            const QString tt = array_.typeText.isEmpty() ? QStringLiteral("数组")
+                                                        : array_.typeText;
+            titleText = QStringLiteral("%1(%2)").arg(label_, tt);
+        }
+        const int titleW = width() - (kind_ == DashboardWidget::Kind::Array ? 64 : 100);
+        const QString title = QFontMetrics(f).elidedText(titleText, Qt::ElideRight, titleW);
+        p.drawText(QRectF(14, 6, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, title);
 
+        if (kind_ == DashboardWidget::Kind::Array) return;
         if (kind_ == DashboardWidget::Kind::Gauge) paintGauge(p);
         else if (kind_ == DashboardWidget::Kind::Slider) paintSlider(p);
         else if (kind_ == DashboardWidget::Kind::Toggle) paintToggle(p);
@@ -370,10 +455,16 @@ protected:
     }
 
     void contextMenuEvent(QContextMenuEvent* e) override {
+        showItemMenu(e->globalPos());
+    }
+
+    void showItemMenu(const QPoint& global) {
         QMenu menu(this);
-        menu.addAction("绑定变量/范围…", this, [this] { if (bind_) bind_(); });
+        menu.addAction("设置", this, [this] { if (bind_) bind_(); });
+        if (kind_ == DashboardWidget::Kind::Array)
+            menu.addAction("更新", this, [this] { refreshArray(); });
         menu.addAction("移除组件", this, [this] { if (remove_) remove_(); });
-        menu.exec(e->globalPos());
+        menu.exec(global);
     }
 
 private:
@@ -543,6 +634,9 @@ private:
         p.drawEllipse(QPointF(knobX, pill.center().y()), 12, 12);
     }
 
+    ArrayView* arrayView_ = nullptr;
+    QToolButton* arrayZoom_ = nullptr;
+    ArrayInfo array_;
     DashboardWidget* owner_ = nullptr;
     DashboardWidget::Kind kind_;
     QString path_;
@@ -584,6 +678,7 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     menu->addAction("仪表", this, [this] { addItemInteractive(Kind::Gauge); });
     menu->addAction("滑块", this, [this] { addItemInteractive(Kind::Slider); });
     menu->addAction("开关", this, [this] { addItemInteractive(Kind::Toggle); });
+    menu->addAction("数组", this, [this] { addItemInteractive(Kind::Array); });
     add->setMenu(menu);
     auto* clear = new QPushButton("清空", this);
     connect(clear, &QPushButton::clicked, this, &DashboardWidget::clearAll);
@@ -718,20 +813,69 @@ void DashboardWidget::addItem(Kind kind, const QString& path, const QString& lab
     refresh();
 }
 
+void DashboardWidget::addArrayItem(const ArrayInfo& a, const QString& label) {
+    tileW_ = tileWidth();
+    auto* item = new DashboardItem(this, Kind::Array, a.path, label, 0, 1,
+                                   accentFor(items_.size()), canvas_);
+    item->setTileSize(QSize(tileW_, tileH_));
+    item->setCallbacks(
+        [this](const QString& p, double v) { emit writeRequested(p, v); },
+        [this, item] { bindItem(item); },
+        [this, item] { removeItem(item); });
+    item->setArrayReader([this](const ArrayInfo& ai, QVector<double>& v, QString* e) {
+        return sampleArray(ai, v, e);
+    });
+    item->setArrayBinding(a, label);
+    item->setArrayLive(arrayLive_);
+    QPoint p = firstFreeCell();
+    if (p.x() < 0) {
+        const int cols = colCount();
+        const int rows = (items_.size() + 1 + cols - 1) / cols;
+        canvas_->setMinimumHeight(2 * margin_ + rows * tileH_ + (rows - 1) * gap_);
+        p = firstFreeCell();
+    }
+    item->move(p.x() >= 0 ? p : cellPos(0, 0));
+    item->show();
+    items_.append(item);
+    updateEmptyHint();
+}
+
 void DashboardWidget::addItemInteractive(Kind kind) {
+    if (kind == Kind::Array) {
+        if (arrays_.isEmpty()) {
+            QMessageBox::information(this, "没有可绑定的数组",
+                "当前没有可用的数值型数组，请先导入包含数组变量的 ELF。");
+            return;
+        }
+        BindDialog dlg(model_, Kind::Array, this, arrays_);
+        if (dlg.exec() == QDialog::Accepted) {
+            const ArrayInfo a = dlg.arrayInfo();
+            if (a.isValid()) addArrayItem(a, dlg.label());
+        }
+        return;
+    }
     if (!model_ || model_->leafCount() == 0) {
         QMessageBox::information(this, "没有可绑定变量",
             "请先在「变量…」对话框里导入 ELF/SVD 并监控变量。");
         return;
     }
-    BindDialog dlg(model_, kind, this);
+    BindDialog dlg(model_, kind, this, {});
     if (dlg.exec() == QDialog::Accepted)
         addItem(kind, dlg.path(), dlg.label(), dlg.minV(), dlg.maxV());
 }
 
 void DashboardWidget::bindItem(DashboardItem* item) {
     if (!item) return;
-    BindDialog dlg(model_, item->kind(), this, item->path(), item->label(),
+    if (item->kind() == Kind::Array) {
+        BindDialog dlg(model_, Kind::Array, this, arrays_, item->path(), item->label());
+        if (dlg.exec() == QDialog::Accepted) {
+            const ArrayInfo a = dlg.arrayInfo();
+            if (a.isValid())
+                item->setArrayBinding(a, dlg.label());
+        }
+        return;
+    }
+    BindDialog dlg(model_, item->kind(), this, {}, item->path(), item->label(),
                    item->minV(), item->maxV());
     if (dlg.exec() == QDialog::Accepted) {
         item->setBinding(dlg.path(), dlg.label(), dlg.minV(), dlg.maxV());
@@ -748,9 +892,29 @@ void DashboardWidget::removeItem(DashboardItem* item) {
     updateEmptyHint();
 }
 
+void DashboardWidget::setArrayReader(ArrayReader r) {
+    arrayReader_ = std::move(r);
+    for (auto* it : items_) it->setArrayReader(arrayReader_);
+}
+
+void DashboardWidget::setArrayLive(bool on) {
+    arrayLive_ = on;
+    for (auto* it : items_) it->setArrayLive(on);
+}
+
+bool DashboardWidget::sampleArray(const ArrayInfo& a, QVector<double>& out,
+                                  QString* err) {
+    if (!arrayReader_) {
+        if (err) *err = QStringLiteral("未设置数组读取接口");
+        return false;
+    }
+    return arrayReader_(a, out, err);
+}
+
 void DashboardWidget::refresh() {
     if (!model_) return;
     for (auto* item : items_) {
+        if (item->kind() == Kind::Array) continue;
         const int li = model_->leafIndexByPath(item->path());
         if (li < 0) {
             item->setValue(0, QStringLiteral("—"), false);
@@ -791,6 +955,16 @@ void DashboardWidget::saveState(QSettings& s) const {
         s.setValue("max", items_[i]->maxV());
         s.setValue("x", items_[i]->x());
         s.setValue("y", items_[i]->y());
+        if (items_[i]->kind() == Kind::Array) {
+            const ArrayInfo a = items_[i]->arrayInfo();
+            s.setValue("addr", qulonglong(a.addr));
+            s.setValue("count", a.count);
+            s.setValue("elemSize", a.elemSize);
+            s.setValue("type", int(a.type));
+            s.setValue("bitOffset", a.bitOffset);
+            s.setValue("bitWidth", a.bitWidth);
+            s.setValue("typeText", a.typeText);
+        }
     }
     s.endArray();
 }
@@ -801,6 +975,26 @@ void DashboardWidget::restoreState(QSettings& s) {
     for (int i = 0; i < n; ++i) {
         s.setArrayIndex(i);
         int k = s.value("kind", -1).toInt();
+        if (k == int(Kind::Array)) {
+            ArrayInfo a;
+            a.path = s.value("path").toString();
+            a.addr = s.value("addr").toUInt();
+            a.count = s.value("count").toUInt();
+            a.elemSize = s.value("elemSize").toUInt();
+            a.type = VariableDef::Type(s.value("type", int(VariableDef::Float)).toInt());
+            a.bitOffset = s.value("bitOffset", -1).toInt();
+            a.bitWidth = s.value("bitWidth", 0).toInt();
+            a.typeText = s.value("typeText").toString();
+            for (const auto& ca : arrays_) {
+                if (ca.path == a.path && ca.count == a.count && ca.type == a.type) {
+                    a = ca;
+                    break;
+                }
+            }
+            if (a.isValid())
+                addArrayItem(a, s.value("label").toString());
+            continue;
+        }
         if (k < int(Kind::Value) || k > int(Kind::Editor)) continue;
         if (k == int(Kind::Editor)) k = int(Kind::Value);   /* 旧“数值编辑”合并到“数值” */
         addItem(Kind(k), s.value("path").toString(), s.value("label").toString(),

@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "core/variable_writer.h"
+#include "core/value_codec.h"
 #include "gui/dashboard_widget.h"
 #include "gui/write_dialog.h"
 #include "variable_dialog.h"
@@ -485,6 +486,10 @@ void MainWindow::buildUi() {
     plot_ = new PlotWidget(this);
     dashboard_ = new DashboardWidget(this);
     dashboard_->setMonitorModel(model_);
+    dashboard_->setArrayReader([this](const ArrayInfo& a, QVector<double>& v,
+                                      QString* e) {
+        return readArraySnapshot(a, v, e);
+    });
     connect(dashboard_, &DashboardWidget::writeRequested,
             this, &MainWindow::onDashboardWrite);
 
@@ -809,6 +814,7 @@ void MainWindow::onConnectClicked() {
         cfg.speed_khz = tck ? uint32_t(tck->currentText().toInt() * 1000) : 4000;
     if (!link_.open(cfg)) { setStatus("连接失败: " + link_.lastErrorText(), true); link_.close(); return; }
     connectedBackend_ = backend;
+    if (dashboard_) dashboard_->setArrayLive(true);
     /* 新连接 = 新会话时间轴, 清空旧波形/历史 */
     plot_->clearData();
     history_.clear();
@@ -841,6 +847,7 @@ void MainWindow::onDisconnectClicked() {
     }
     link_.close();
     connectedBackend_.clear();
+    if (dashboard_) dashboard_->setArrayLive(false);
     actConn_->setEnabled(true); actDisc_->setEnabled(false);
     actStart_->setEnabled(false); actSingle_->setEnabled(false);
     setConnControlsEnabled(true);
@@ -934,6 +941,7 @@ void MainWindow::onEngineStopped() {
         pendingDisconnect_ = false;
         link_.close();
         connectedBackend_.clear();
+        if (dashboard_) dashboard_->setArrayLive(false);
         actConn_->setEnabled(true); actDisc_->setEnabled(false);
         actStart_->setEnabled(false); actSingle_->setEnabled(false);
         setConnControlsEnabled(true);
@@ -1112,9 +1120,111 @@ void MainWindow::onElfReloadFinished() {
     syncPlotChannels();
     reconfigureEngine();
     updateStartAction();
+    rebuildArrayCatalog();
 }
 
 /* 会话叶子: 除 ELF/SVD 重导入外, 也持久化仿真/绘制专用等扁平变量 */
+/* ---------------- 数组组件 ---------------- */
+namespace {
+
+/* 展平数组元素为标量叶子 */
+bool flattenArrayLeaves(const DwarfVar& v, QVector<DwarfVar>& out) {
+    if (v.isArray || v.isStruct) {
+        if (v.members.isEmpty()) return false;
+        for (const auto& m : v.members)
+            if (!flattenArrayLeaves(m, out)) return false;
+        return true;
+    }
+    out.append(v);
+    return true;
+}
+
+/* 递归收集"连续、同类型、无位域"的数值数组 */
+void collectArrayInfos(const DwarfVar& v, QVector<ArrayInfo>& out) {
+    if (v.isArray && !v.members.isEmpty()) {
+        QVector<DwarfVar> leaves;
+        if (flattenArrayLeaves(v, leaves) && !leaves.isEmpty()) {
+            const DwarfVar& f = leaves.first();
+            bool ok = !f.isArray && !f.isStruct && f.members.isEmpty() &&
+                      f.bitOffset < 0 && f.size > 0 && f.size <= 8;
+            const quint64 bytes = quint64(leaves.size()) * f.size;
+            if (bytes > 65536) ok = false;
+            for (int i = 0; ok && i < leaves.size(); ++i) {
+                const auto& l = leaves[i];
+                if (l.isArray || l.isStruct || !l.members.isEmpty() ||
+                    l.bitOffset >= 0 || l.type != f.type || l.size != f.size ||
+                    l.addr != f.addr + uint32_t(i) * f.size)
+                    ok = false;
+            }
+            if (ok) {
+                ArrayInfo a;
+                a.path = v.name;
+                a.typeText = v.typeText;
+                a.addr = f.addr;
+                a.count = uint32_t(leaves.size());
+                a.elemSize = f.size;
+                a.type = f.type;
+                a.bitOffset = f.bitOffset;
+                a.bitWidth = f.bitWidth;
+                out.append(a);
+            }
+        }
+        return;   /* 数组元素不再作为子数组重复收集 */
+    }
+    for (const auto& m : v.members) collectArrayInfos(m, out);
+}
+
+} // namespace
+
+void MainWindow::rebuildArrayCatalog() {
+    QVector<ArrayInfo> out;
+    if (varDialog_) {
+        for (const auto& v : varDialog_->elfVars()) collectArrayInfos(v, out);
+    }
+    if (dashboard_) dashboard_->setArrayCatalog(out);
+    if (!out.isEmpty()) appendLog(QString("数组变量: %1 个").arg(out.size()));
+}
+
+bool MainWindow::readArraySnapshot(const ArrayInfo& a, QVector<double>& out,
+                                   QString* err) {
+    if (connectedBackend_.isEmpty() || !link_.isLoaded()) {
+        if (err) *err = QStringLiteral("尚未连接目标");
+        return false;
+    }
+    if (!a.isValid()) {
+        if (err) *err = QStringLiteral("数组信息无效");
+        return false;
+    }
+    const quint64 bytes64 = quint64(a.count) * a.elemSize;
+    if (bytes64 == 0 || bytes64 > 1024u * 1024u) {
+        if (err) *err = QStringLiteral("数组过大");
+        return false;
+    }
+    QByteArray buf(int(bytes64), '\0');
+    uint8_t* dst = reinterpret_cast<uint8_t*>(buf.data());
+    const uint32_t kChunk = 200;   /* 协议单次读上限, 大数组分块读取 */
+    for (uint32_t off = 0; off < uint32_t(bytes64); off += kChunk) {
+        const uint32_t n = std::min<uint32_t>(kChunk, uint32_t(bytes64) - off);
+        gs32_mem_region_t r{a.addr + off, n};
+        if (!link_.read(&r, 1, dst + off, n, 1000)) {
+            if (err) *err = link_.lastErrorText();
+            return false;
+        }
+    }
+    out.resize(int(a.count));
+    for (uint32_t i = 0; i < a.count; ++i) {
+        VariableDef d;
+        d.addr = a.addr + i * a.elemSize;
+        d.size = a.elemSize;
+        d.type = a.type;
+        d.bitOffset = a.bitOffset;
+        d.bitWidth = a.bitWidth;
+        out[int(i)] = gs32::decodeValue(
+            d, reinterpret_cast<const uint8_t*>(buf.constData()) + i * a.elemSize);
+    }
+    return true;
+}
+
 void MainWindow::saveSessionLeaves(QSettings& s) const {
     if (!model_) return;
     s.beginWriteArray("session/leaves", model_->leafCount());

@@ -13,9 +13,6 @@ on:
     paths:
       - ".github/workflows/build.yml"
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: windows-latest
@@ -101,27 +98,9 @@ jobs:
           du -sh "$DIST"
           find "$DIST" -maxdepth 2 -type f | wc -l
 
-      - name: Create zip
-        shell: pwsh
-        run: |
-          Compress-Archive -LiteralPath "dist/GS32Scope $env:VERSION" -DestinationPath "dist/GS32Scope $env:VERSION.zip" -Force
-          Get-Item "dist/GS32Scope $env:VERSION.zip" | Select-Object FullName, Length
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "GS32Scope-${{ env.VERSION }}"
-          path: "dist/GS32Scope ${{ env.VERSION }}.zip"
+          name: "GS32Scope ${{ env.VERSION }}"
+          path: dist/
           if-no-files-found: error
-
-      - name: Publish GitHub Release
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          gh release view "$VERSION" >/dev/null 2>&1 || \
-            gh release create "$VERSION" --title "GS32Scope $VERSION" \
-              --notes "GS32Scope $VERSION"
-          gh release upload "$VERSION" "dist/GS32Scope $VERSION.zip" --clobber

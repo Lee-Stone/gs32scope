@@ -141,6 +141,14 @@ MainWindow::MainWindow() {
             QSettings().clear();
         }
         QSettings s;
+        /* 新版本第一次运行: 清空上一次会话(ELF/变量/组件/布局), 保证从空界面开始;
+         * 关闭后 initialized=true, 之后的启动再恢复本次会话。 */
+        constexpr int kSessionSchema = 2;
+        if (s.value("session/schema", 0).toInt() != kSessionSchema) {
+            s.clear();
+            s.setValue("session/schema", kSessionSchema);
+            s.sync();
+        }
         const bool initialized = s.value("session/initialized", false).toBool();
         const QString be = s.value("toolbar/backend").toString();
         if (!be.isEmpty())

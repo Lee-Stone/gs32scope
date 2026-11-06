@@ -47,6 +47,7 @@ jobs:
         run: |
           set -e
           cd gs32link
+          mkdir -p ../drivers
           mingw32-make -B SHELL=cmd.exe -j"$(nproc)"
           ls -l ../drivers/gs32link_gslink.dll ../drivers/gs32link_sci.dll
 

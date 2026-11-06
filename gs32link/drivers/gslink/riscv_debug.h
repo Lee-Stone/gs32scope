@@ -14,6 +14,7 @@
  */
 #include "ftdi_jtag.h"
 #include "gs32link_util.h"
+#include <string>
 
 namespace gs32 {
 
@@ -25,6 +26,14 @@ public:
      * 非线程安全, 由上层加锁后调用 */
     int  ensureReady();
     bool isReady() const { return ready_; }
+
+    /* 目标校验: 期望的 JTAG IDCODE 与型号名; idcode=0 表示不校验。
+     * ensureReady() 读到实际 IDCODE 后比对, 不一致时返回 GS32_ERR_CONNECT。 */
+    void setExpectedChip(uint32_t idcode, const char* model) {
+        expectedIdcode_ = idcode;
+        expectedModel_ = model ? model : "";
+    }
+    uint32_t detectedIdcode() const { return idcode_; }
 
     /* 内存读写(8/32bit SBA, 头尾按 8bit 对齐补偿) */
     int  readMem (uint32_t addr, uint8_t* dst, uint32_t size);
@@ -62,6 +71,9 @@ private:
     bool ready_ = false;
     int curSbAccess_ = -1;   /* 当前 sbaccess 宽度缓存, 变化时才重写 sbcs */
     bool autoInc_ = false;   /* sbautoincrement+sbreadondata 突发模式(sbaConfigure 探测) */
+    uint32_t expectedIdcode_ = 0;
+    uint32_t idcode_ = 0;
+    std::string expectedModel_;
 };
 
 } // namespace gs32

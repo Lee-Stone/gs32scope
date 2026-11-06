@@ -23,7 +23,7 @@ class QAction;
 class QActionGroup;
 class QLineEdit;
 class QDockWidget;
-class QPlainTextEdit;
+class LogView;
 class VariableDialog;
 class DashboardWidget;
 struct ArrayInfo;
@@ -38,7 +38,7 @@ public:
     ~MainWindow() override;
 
 protected:
-    void closeEvent(QCloseEvent* e) override;   /* 退出时保存会话(UI 设定持久化) */
+    void closeEvent(QCloseEvent* e) override;
 
 private slots:
     void onConnectClicked();
@@ -129,7 +129,7 @@ private:
     QDockWidget* plotDock_ = nullptr;
     QDockWidget* dashDock_ = nullptr;
     QDockWidget* logDock_ = nullptr;
-    QPlainTextEdit* logView_ = nullptr;
+    LogView*     logView_ = nullptr;
 
     /* 会话时间轴(停止/继续时去除停采时间)与各叶子历史(用于新通道回放) */
     QHash<QString, QVector<QPointF>> history_;

@@ -29,7 +29,14 @@ public:
         if (!scr) return;
         const QRect avail = scr->availableGeometry();
         const int w = std::max(width(), popup->width());
-        const int h = popup->height();
+        int h = popup->height();
+        /* Qt 在部分样式下会把弹出列表拉到整屏高; 按 maxVisibleItems 限高,
+         * 其余条目通过列表滚动查看 */
+        if (view() && maxVisibleItems() > 0) {
+            const int rowH = view()->sizeHintForRow(0);
+            if (rowH > 0)
+                h = std::min(h, rowH * maxVisibleItems() + 2 * view()->frameWidth());
+        }
         int x = mapToGlobal(QPoint(0, 0)).x();
         int y = mapToGlobal(QPoint(0, height())).y();   /* 始终放在下方 */
         x = std::clamp(x, avail.left(), std::max(avail.left(), avail.right() - w));

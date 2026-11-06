@@ -14,6 +14,7 @@
 #include <utility>
 
 class QLabel;
+class QMenu;
 class QScrollArea;
 class QSettings;
 class MonitorModel;
@@ -42,6 +43,8 @@ public:
     void restoreState(QSettings& s);
     void createDemoPanel();
     void clearAll();
+    /* 数据菜单: 添加组件的子菜单(数值/仪表/滑块/开关/数组) */
+    void populateAddMenu(QMenu* menu);
     int  itemCount() const { return items_.size(); }
 
 signals:

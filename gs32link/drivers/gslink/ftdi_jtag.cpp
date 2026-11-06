@@ -297,7 +297,7 @@ bool FtdiJtag::tapReset() {
 }
 
 /* IR 扫描: 单笔通讯 IDLE→Select-IR→Capture-IR→Shift-IR(移位)→Exit1→Update-IR→IDLE */
-bool FtdiJtag::scanIRn(int len, uint8_t ir) {
+bool FtdiJtag::scanIRn(int len, uint32_t ir) {
     if (len <= 0) return true;
     if (batching_ && !flushBatch()) return false;   /* IR 扫描不参与聚合 */
     uint8_t tdi[4] = {0, 0, 0, 0};
@@ -327,14 +327,35 @@ bool FtdiJtag::scanIRn(int len, uint8_t ir) {
     cmd.push_back((bitAt8(tdi, len - 1) ? 0x80u : 0x00u) | 0x01u);
     appendTms_(cmd, 0x01, 5, true);              /* Exit1→Update-IR(锁存)→IDLE+idle */
     cmd.push_back(0x87);
-    logDbg("[tx IR 0x%02X %d bits, %zu B] %s\n", ir, len, cmd.size(),
+    logDbg("[tx IR 0x%X %d bits, %zu B] %s\n", ir, len, cmd.size(),
            hexDump(cmd.data(), cmd.size()).c_str());
     return writeFull_(cmd.data(), (uint32_t)cmd.size());
 }
 
+void FtdiJtag::setChain(int tapCount, int target) {
+    tapCount_ = tapCount < 1 ? 1 : tapCount;
+    if (irLen_ > 0 && tapCount_ * irLen_ > 32)
+        tapCount_ = 32 / irLen_;                 /* IR 字最多 32bit */
+    targetTap_ = target < 0 ? 0 : (target >= tapCount_ ? tapCount_ - 1 : target);
+    curIr_ = -1;
+    logInfo("[init] JTAG chain: %d TAP(s), target #%d (0=TDO)\n",
+            tapCount_, targetTap_);
+}
+
 bool FtdiJtag::scanIR(uint8_t ir) {
     if (curIr_ == (int)ir) return true;          /* IR 未变: 跳过重扫 */
-    if (!scanIRn(irLen_, ir)) { curIr_ = -1; return false; }
+    uint32_t word = ir;
+    int len = irLen_;
+    if (tapCount_ > 1) {
+        /* 链序号 0 = 最靠近 TDO; 低位先移入, 按序号 i 放到 i*IR长度 */
+        word = 0;
+        for (int i = 0; i < tapCount_; ++i) {
+            const uint32_t v = (i == targetTap_) ? (uint32_t)ir : 0x1Fu;
+            word |= v << (irLen_ * i);
+        }
+        len = irLen_ * tapCount_;
+    }
+    if (!scanIRn(len, word)) { curIr_ = -1; return false; }
     curIr_ = ir;
     return true;
 }
@@ -355,7 +376,35 @@ static void decodeDr_(const uint8_t* rx, uint32_t bits, uint8_t* tdo) {
  * 读回: 0x39 每字节返回 1B(bit0=首TDO, LSB first, 与 tdo 字节直接对齐),
  *       逐位/末位每时钟返回 1B(TDO 在 bit7), 共 bits 字节一次取回。
  * 批量模式: 命令流挂入 batchCmd_, TDO 在 flushBatch() 统一取回解码 */
+/* 多 TAP: 非目标 TAP 在 DR 中占 1bit BYPASS。
+ * 输入/输出都从靠 TDO 的 TAP 开始; 目标前有 targetTap 个 bypass 位。
+ * 例: 2 TAP、目标 #1: 输入 = bypass, 目标 DR; 输出 = bypass, 目标 DR。 */
 bool FtdiJtag::scanDR(uint32_t bits, const uint8_t* tdi, uint8_t* tdo) {
+    if (tapCount_ <= 1 || bits == 0) return scanDRRaw(bits, tdi, tdo);
+    if (batching_ && !flushBatch()) return false;   /* 链模式暂不聚合 */
+    const uint32_t total = bits + (uint32_t)(tapCount_ - 1);
+    if (total > 64) return false;
+    const uint32_t inOff = (uint32_t)targetTap_;
+    std::vector<uint8_t> in((total + 7) / 8, 0);
+    for (uint32_t i = 0; i < bits; ++i) {
+        if (!bitAt8(tdi, (int)i)) continue;
+        const uint32_t p = inOff + i;
+        in[p >> 3] |= (uint8_t)(1u << (p & 7));
+    }
+    uint8_t out[8] = {};
+    if (!scanDRRaw(total, in.data(), out)) return false;
+    if (tdo) {
+        memset(tdo, 0, (bits + 7) / 8);
+        for (uint32_t i = 0; i < bits; ++i) {
+            const uint32_t p = (uint32_t)targetTap_ + i;
+            if ((out[p >> 3] >> (p & 7)) & 1)
+                tdo[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+    }
+    return true;
+}
+
+bool FtdiJtag::scanDRRaw(uint32_t bits, const uint8_t* tdi, uint8_t* tdo) {
     if (bits == 0) {
         if (batching_ && !flushBatch()) return false;
         return tmsShift_({true, false, true, false, false}, false);

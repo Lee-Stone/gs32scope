@@ -9,6 +9,7 @@
 #include "gslink_log.h"
 #include "riscv_debug.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -29,6 +30,27 @@ struct GsLinkState {
 };
 
 std::string g_global_error = "no error";
+
+/* extra JSON 值提取(无 JSON 库): {"model":"GS32F0039A","idcode":2717717613} */
+std::string jsonStr(const char* json, const char* key) {
+    if (!json || !key) return {};
+    const std::string pat = "\"" + std::string(key) + "\"";
+    const char* k = strstr(json, pat.c_str());
+    const char* c = k ? strchr(k + pat.size(), ':') : nullptr;
+    const char* q1 = c ? strchr(c + 1, '"') : nullptr;
+    const char* q2 = q1 ? strchr(q1 + 1, '"') : nullptr;
+    if (!q1 || !q2) return {};
+    return std::string(q1 + 1, q2);
+}
+
+/* extra JSON 无符号整数值; 支持十进制/0x 前缀 */
+uint32_t jsonUint(const char* json, const char* key) {
+    if (!json || !key) return 0;
+    const std::string pat = "\"" + std::string(key) + "\"";
+    const char* k = strstr(json, pat.c_str());
+    const char* c = k ? strchr(k + pat.size(), ':') : nullptr;
+    return c ? (uint32_t)strtoul(c + 1, nullptr, 0) : 0;
+}
 
 } // namespace
 
@@ -95,6 +117,33 @@ GS32LINK_EXPORT int gs32_open(const gs32_config_t* cfg, gs32_handle_t* out) {
         gs32::logInfo("[open] %s\n", err.c_str());
         delete s;
         return GS32_ERR_CONNECT;
+    }
+
+    /* 目标校验: 型号 + 期望 IDCODE 来自宿主 extra JSON */
+    std::string model;
+    uint32_t expectedId = 0, taps = 1, tapIndex = 0;
+    if (cfg->extra) {
+        model = jsonStr(cfg->extra, "model");
+        expectedId = jsonUint(cfg->extra, "idcode");
+        taps = jsonUint(cfg->extra, "taps");
+        tapIndex = jsonUint(cfg->extra, "tap");
+        if (taps == 0) taps = 1;
+    }
+    if (expectedId) {
+        gs32::logInfo("[open] target=%s expected IDCODE=0x%08X chain=%u/%u\n",
+                      model.c_str(), expectedId, taps, tapIndex);
+    }
+    s->jtag.setChain((int)taps, (int)tapIndex);
+    s->dbg.setExpectedChip(expectedId, model.c_str());
+
+    /* 连接即完成 TAP/DM 初始化并校验目标; 失败则连接失败 */
+    const int initRc = s->dbg.ensureReady();
+    if (initRc != GS32_OK) {
+        g_global_error = s->err.text();
+        gs32::logInfo("[open] %s\n", g_global_error.c_str());
+        s->jtag.close();
+        delete s;
+        return initRc;
     }
     s->err.clear();
     *out = s;

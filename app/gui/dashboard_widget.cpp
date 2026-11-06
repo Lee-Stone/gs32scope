@@ -669,24 +669,6 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(8, 8, 8, 8);
     root->setSpacing(6);
 
-    auto* bar = new QHBoxLayout();
-    auto* add = new QToolButton(this);
-    add->setText("添加组件");
-    add->setPopupMode(QToolButton::InstantPopup);
-    auto* menu = new QMenu(add);
-    menu->addAction("数值", this, [this] { addItemInteractive(Kind::Value); });
-    menu->addAction("仪表", this, [this] { addItemInteractive(Kind::Gauge); });
-    menu->addAction("滑块", this, [this] { addItemInteractive(Kind::Slider); });
-    menu->addAction("开关", this, [this] { addItemInteractive(Kind::Toggle); });
-    menu->addAction("数组", this, [this] { addItemInteractive(Kind::Array); });
-    add->setMenu(menu);
-    auto* clear = new QPushButton("清空", this);
-    connect(clear, &QPushButton::clicked, this, &DashboardWidget::clearAll);
-    bar->addWidget(add);
-    bar->addWidget(clear);
-    bar->addStretch(1);
-    root->addLayout(bar);
-
     canvas_ = new DashboardCanvas(this, this);
     canvas_->setMinimumSize(300, 260);
     canvas_->setStyleSheet("border:none;");
@@ -696,7 +678,7 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     scroll_->setWidget(canvas_);
     root->addWidget(scroll_, 1);
 
-    emptyHint_ = new QLabel("点击「添加组件」创建数值 / 仪表 / 滑块 / 开关", canvas_);
+    emptyHint_ = new QLabel("通过「数据 → 添加组件」创建数值 / 仪表 / 滑块 / 开关 / 数组", canvas_);
     emptyHint_->setAlignment(Qt::AlignCenter);
     emptyHint_->setStyleSheet("background:transparent;border:none;");
     {
@@ -706,6 +688,15 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     }
     emptyHint_->setAttribute(Qt::WA_TransparentForMouseEvents);
     updateEmptyHint();
+}
+
+void DashboardWidget::populateAddMenu(QMenu* menu) {
+    if (!menu) return;
+    menu->addAction("数值", this, [this] { addItemInteractive(Kind::Value); });
+    menu->addAction("仪表", this, [this] { addItemInteractive(Kind::Gauge); });
+    menu->addAction("滑块", this, [this] { addItemInteractive(Kind::Slider); });
+    menu->addAction("开关", this, [this] { addItemInteractive(Kind::Toggle); });
+    menu->addAction("数组", this, [this] { addItemInteractive(Kind::Array); });
 }
 
 DashboardWidget::~DashboardWidget() {

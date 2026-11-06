@@ -52,9 +52,15 @@ public:
     /* ---- TAP 状态机 ---- */
     bool tapReset();          /* Test-Logic-Reset -> IDLE, IR 缓存失效 */
     bool scanIR(uint8_t ir);  /* 设 IR(与缓存相同则跳过重扫) */
-    bool scanIRn(int len, uint8_t ir);                      /* 指定长度的 IR 扫描 */
+    bool scanIRn(int len, uint32_t ir);                     /* 指定长度的 IR 扫描 */
     bool scanDR(uint32_t bits, const uint8_t* tdi, uint8_t* tdo); /* DR 扫描, tdo 可空 */
     bool readDr32(uint32_t* v);   /* 32bit DR 读取便捷封装(tdi=0) */
+
+    /* 多 TAP 扫描链: tapCount 总数, target 为目标序号(0 = 最靠近 TDO)。
+     * 非目标 TAP 在 IR 扫描时置 BYPASS(0x1F), DR 扫描插入 1bit 0。 */
+    void setChain(int tapCount, int target);
+    int  tapCount() const { return tapCount_; }
+    int  targetTap() const { return targetTap_; }
 
     /* Update-DR 之后保持的 IDLE 周期数(dtmcs.idle, 由层2 在读 DTMCS 后设置) */
     void setIdleCycles(int n) { idleCycles_ = n; }
@@ -84,10 +90,13 @@ private:
     bool tmsShift_(const std::vector<bool>& tms, bool tdi);
     bool tmsShiftLast_(bool tdi, uint8_t* tdoBit);
     bool dataShift_(const uint8_t* tdiBytes, uint32_t bits, uint8_t* tdoOut);
+    bool scanDRRaw(uint32_t bits, const uint8_t* tdi, uint8_t* tdo);
 
     D2xxApi api_;
     FT_HANDLE ft_ = nullptr;
     int irLen_ = 5;        /* IR 长度(probe 可修正) */
+    int tapCount_ = 1;     /* JTAG 链 TAP 总数 */
+    int targetTap_ = 0;    /* 目标 TAP 序号, 0 = 最靠近 TDO */
     int curIr_ = -1;       /* 当前 IR 缓存, 相同则跳过重扫 */
     int idleCycles_ = 0;   /* Update-DR 后 IDLE 周期数 */
 

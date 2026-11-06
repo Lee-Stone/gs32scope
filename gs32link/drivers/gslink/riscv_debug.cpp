@@ -328,11 +328,15 @@ int RiscvDebug::ensureReady() {
         err_.set(GS32_ERR_CONNECT, "TAP reset failed");
         return GS32_ERR_CONNECT;
     }
-    /* 诊断 1: TAP 复位后 IR 自动装载 IDCODE, 直接读 DR */
-    {
+    /* 诊断 1: 单 TAP 时 TAP 复位后 IR 自动装载 IDCODE, 直接读 DR。
+     * 多 TAP 时链上是多个 IDCODE, 32bit 直读会错位, 跳过。 */
+    uint32_t idcode = 0;
+    bool idcodeOk = false;
+    if (j_.tapCount() == 1) {
         uint32_t id = 0;
         const bool ok = j_.readDr32(&id);
         logIdcode("after TAP reset", ok, id);
+        if (ok) { idcode = id; idcodeOk = true; }
     }
     /* 诊断 2: 显式设置 IR=IDCODE(0x01) 再读, 验证 IR 移位/Update 锁存路径 */
     if (!j_.scanIR(IR_IDCODE)) {
@@ -341,6 +345,24 @@ int RiscvDebug::ensureReady() {
         uint32_t id = 0;
         const bool ok = j_.readDr32(&id);
         logIdcode("IR=0x01 set", ok, id);
+        if (ok) { idcode = id; idcodeOk = true; }
+    }
+    if (idcodeOk) idcode_ = idcode;
+
+    /* 目标型号校验: JTAG IDCODE 必须与所选型号的配置族一致 */
+    if (expectedIdcode_ && !idcodeOk) {
+        err_.set(GS32_ERR_CONNECT, "目标 IDCODE 读取失败, 无法校验目标型号");
+        return GS32_ERR_CONNECT;
+    }
+    if (expectedIdcode_ && idcode != expectedIdcode_) {
+        char msg[220];
+        snprintf(msg, sizeof(msg),
+                 "目标不匹配: 选择 %s (IDCODE 0x%08X), 实际 0x%08X",
+                 expectedModel_.empty() ? "?" : expectedModel_.c_str(),
+                 expectedIdcode_, idcode);
+        logInfo("[init] %s\n", msg);
+        err_.set(GS32_ERR_CONNECT, msg);
+        return GS32_ERR_CONNECT;
     }
     /* DTM 复位: 写 dtmcs.dmihardreset(下面 DTMCS 事务完成) */
     logInfo("[init] DTM reset via DTMCS dmihardreset...\n");
@@ -349,9 +371,10 @@ int RiscvDebug::ensureReady() {
         err_.set(GS32_ERR_CONNECT, "IR scan(DTMCS) failed");
         return GS32_ERR_CONNECT;
     }
-    {
-        /* dtmcs.dmihardreset = bit17 (Debug Spec 0.13) */
-        const uint32_t hardReset = 1u << 17;
+    /* 37xA 的 DM 需要多次 dmihardreset 才稳定(参考厂商 OpenOCD reset_dm) */
+    for (int pass = 0; pass < 4; ++pass) {
+        /* dtmcs.dmihardreset = bit16 (Debug Spec 0.13); bit17 是 dmireset */
+        const uint32_t hardReset = 1u << 16;
         uint8_t tdi[4], tdo[4] = {};
         for (int i = 0; i < 4; ++i) tdi[i] = (hardReset >> (8 * i)) & 0xFF;
         if (!j_.scanDR(32, tdi, tdo)) {
@@ -359,6 +382,7 @@ int RiscvDebug::ensureReady() {
             err_.set(GS32_ERR_CONNECT, "DR scan(DTMCS) failed");
             return GS32_ERR_CONNECT;
         }
+        Sleep(2);
     }
     /* 读回 DTMCS 验证 DTM 通信, 并解析 idle 周期数(DMI 扫描间必须插入) */
     if (j_.scanIR(IR_DTMCS)) {
@@ -368,15 +392,36 @@ int RiscvDebug::ensureReady() {
             j_.setIdleCycles(idle);
             logInfo("[init] DTMCS=0x%08X (version=%d abits=%d idle=%d)\n",
                     dc, (int)(dc & 0xF), (int)((dc >> 4) & 0x3F), idle);
+            /* 多 TAP 链: IR 只移入当前驱动的一位长度, DTMCS 读到的是 IDCODE */
+            if (idcodeOk && dc == idcode) {
+                logInfo("[init] DTMCS == IDCODE, JTAG 链可能包含多个 TAP\n");
+                err_.set(GS32_ERR_CONNECT,
+                         "目标 JTAG 链扫描失败: DTMCS 读回 IDCODE（TAP 配置可能不匹配）");
+                return GS32_ERR_CONNECT;
+            }
         }
     }
+    /* 激活前读一次 dmstatus, 判断 DMI 通路是否真的通 */
+    {
+        uint32_t pre = 0;
+        if (dmiReadReg(DM_DMSTATUS, &pre) == GS32_OK)
+            logInfo("[init] pre-activate dmstatus=0x%08X\n", pre);
+        else
+            logInfo("[init] pre-activate dmstatus read FAILED\n");
+    }
     logInfo("[init] DM active...\n");
+    /* 37xA: 切换 IR 后先发几个 DMI NOP, 给 DTM/DM 一个同步窗口 */
+    for (int i = 0; i < 4; ++i)
+        dmiAccess(DMI_OP_NOP, DM_DMCONTROL, 0, nullptr);
     if (dmiWriteReg(DM_DMCONTROL, DMCONTROL_DMACTIVE)) {
         logInfo("[init] dmcontrol write FAILED\n");
         return GS32_ERR_CONNECT;
     }
     /* 0.13: dmactive 位在 dmcontrol(bit0), dmstatus 没有此位!
      * 回读 dmcontrol 确认 DM 已激活 */
+    for (int i = 0; i < 4; ++i)
+        dmiAccess(DMI_OP_NOP, DM_DMCONTROL, 0, nullptr);
+    Sleep(2);
     uint32_t ctl = 0;
     bool ok = false;
     for (int i = 0; i < 32; ++i) {
@@ -396,7 +441,7 @@ int RiscvDebug::ensureReady() {
     if (!dmiReadReg(DM_DMSTATUS, &st)) {
         logInfo("[init] dmstatus=0x%08X (ver=%d auth=%d halted=%d havereset=%d)\n",
                 st, (int)(st & 0xF), (int)((st >> 7) & 1),
-                (int)((st >> 9) & 1), (int)((st >> 22) & 1));
+                (int)((st >> 9) & 1), (int)((st >> 19) & 1));
     }
     /* 配置 SBA: sbreadonaddr=1 + 32bit 访问(整个连接生命周期只需一次) */
     /* 在线示波器要求目标运行: 残留调试暂停或系统复位后自动恢复.
@@ -404,7 +449,7 @@ int RiscvDebug::ensureReady() {
      * havereset(核被复位但 allhalted=0), 变量会全部冻结为 0.
      * ackhavereset(bit28) 清复位标志, resumereq(bit30) 让核继续跑. */
     const bool allHalted = (st & (1u << 9)) != 0;
-    const bool hasReset  = (st & (1u << 22)) != 0;
+    const bool hasReset  = (st & (1u << 19)) != 0;   /* allhavereset */
     if (allHalted || hasReset) {
         logInfo("[init] hart %s, resuming...\n",
                 allHalted ? "halted" : "in reset");
@@ -414,10 +459,10 @@ int RiscvDebug::ensureReady() {
         uint32_t s2 = 0;
         for (int i = 0; i < 32; ++i) {
             if (dmiReadReg(DM_DMSTATUS, &s2)) { s2 = 0xDEADDEAD; break; }
-            if (!(s2 & (1u << 9)) && !(s2 & (1u << 22))) break;
+            if (!(s2 & (1u << 9)) && !(s2 & (1u << 19))) break;
         }
         logInfo("[init] resume result dmstatus=0x%08X%s\n", s2,
-                ((s2 & (1u << 9)) || (s2 & (1u << 22)))
+                ((s2 & (1u << 9)) || (s2 & (1u << 19)))
                     ? " (STILL HALTED/RESET - values may be frozen, power-cycle the board)"
                     : " (running)");
     }

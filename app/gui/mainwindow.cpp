@@ -5,6 +5,8 @@
 #include "gui/dashboard_widget.h"
 #include "gui/write_dialog.h"
 #include "variable_dialog.h"
+#include "gui/log_view.h"
+#include "chip_models.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -13,6 +15,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHash>
 #include <QInputDialog>
@@ -34,6 +37,7 @@
 #include <QStyleFactory>
 #include <QStyleHints>
 #include <QToolBar>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -158,7 +162,11 @@ MainWindow::MainWindow() {
                 }
         /* 先按后端准备好第二组参数(TCK/波特率)与目标列表, 再恢复具体选项 */
         applyBackendUi(backendBox_->currentData().toString());
-        const int di = ui->deviceBox->findText(s.value("toolbar/device").toString());
+        const QString beNow = backendBox_->currentData().toString();
+        const bool chipNow = (beNow == "gslink" || beNow == "jlink" ||
+                              beNow == "can");
+        const int di = ui->deviceBox->findText(
+            s.value(chipNow ? "toolbar/target" : "toolbar/device").toString());
         if (di >= 0) ui->deviceBox->setCurrentIndex(di);
         int rate = s.value("toolbar/rate", -1).toInt();
         if (rate <= 0) {
@@ -192,6 +200,7 @@ MainWindow::MainWindow() {
     }
     if (!restoredDockState)
         QTimer::singleShot(0, this, &MainWindow::defaultDockLayout);
+    /* restoreState 会覆盖工具栏换行, 恢复后再强制一次 */
 
     /* 跟随系统: Windows 深浅色切换时实时重刷 */
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
@@ -414,8 +423,11 @@ void MainWindow::applyTheme(const QString& mode) {
 /* 退出时保存会话: 工具栏参数 + 变量对话框导入文件与勾选状态 */
 void MainWindow::closeEvent(QCloseEvent* e) {
     QSettings s;
-    s.setValue("toolbar/backend", backendBox_->currentData().toString());
+    const QString be = backendBox_->currentData().toString();
+    s.setValue("toolbar/backend", be);
     s.setValue("toolbar/device", ui->deviceBox->currentText());
+    if (be == "gslink" || be == "jlink" || be == "can")
+        s.setValue("toolbar/target", ui->deviceBox->currentText());
     s.setValue("toolbar/rate", intervalSpin_->value());
     s.setValue("toolbar/tck", ui->tckBox->currentText());
     s.setValue("appearance/theme", themeMode_);
@@ -444,6 +456,7 @@ MainWindow::~MainWindow() {
 /* setupUi 之后的代码侧收尾: 控件指针绑定/动态内容/代码专属属性 */
 void MainWindow::buildUi() {
     backendBox_ = ui->backendBox;
+    ui->deviceBox->setMaxVisibleItems(5);
     intervalSpin_ = ui->intervalSpin;
     statusConn_ = ui->statusConn;
     statusRate_ = ui->statusRate;
@@ -487,6 +500,15 @@ void MainWindow::buildUi() {
         /* 展开"目标"下拉时再枚举一次串口, 插拔设备后无需重启 */
         connect(ui->deviceBox, &ComboBox::popupAboutToShow,
                 this, &MainWindow::refreshDeviceList);
+        /* 记住目标型号: 用户一选择就写入, 不依赖正常关闭 */
+        connect(ui->deviceBox, &QComboBox::currentTextChanged, this,
+                [this](const QString& text) {
+                    const QString be = backendBox_->currentData().toString();
+                    if (be == "gslink" || be == "jlink" || be == "can")
+                        QSettings().setValue("toolbar/target", text);
+                    else if (be == "sci")
+                        QSettings().setValue("toolbar/device", text);
+                });
     }
 
     /* 四块停靠面板: 波形+仪表盘(上排等宽) / 监控+日志(下排等宽) */
@@ -523,11 +545,8 @@ void MainWindow::buildUi() {
     dashDock_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     dashDock_->setMinimumHeight(480);
 
-    logView_ = new QPlainTextEdit(this);
+    logView_ = new LogView(this);
     logView_->setObjectName("logView");
-    logView_->setReadOnly(true);
-    logView_->setMaximumBlockCount(5000);
-    logView_->setLineWrapMode(QPlainTextEdit::NoWrap);
     {
         QFont mono("Consolas");
         mono.setStyleHint(QFont::Monospace);
@@ -568,7 +587,7 @@ void MainWindow::buildUi() {
     connect(ui->actVar, &QAction::triggered, this, &MainWindow::onOpenVariableDialog);
 
     /* 波形数据操作: 导出 CSV / 清空; 放到菜单里, 避免工具栏拥挤 */
-    actCsv_ = new QAction("导出 CSV", this);
+    actCsv_ = new QAction("导出CSV", this);
     actClear_ = new QAction("清空波形", this);
     /* 快捷键保留功能但不显示在菜单里 */
     auto* shortcutCsv = new QShortcut(QKeySequence("Ctrl+Shift+E"), this);
@@ -580,6 +599,9 @@ void MainWindow::buildUi() {
 
     auto* dataMenu = menuBar()->addMenu("数据(&D)");
     dataMenu->addAction(actCsv_);
+    dataMenu->addSeparator();
+    auto* addCompMenu = dataMenu->addMenu("添加组件");
+    dashboard_->populateAddMenu(addCompMenu);
     dataMenu->addSeparator();
     dataMenu->addAction("清空变量", this, [this] {
         plot_->clearData();
@@ -635,7 +657,9 @@ void MainWindow::buildUi() {
         cb->setMinimumContentsLength(7);
     }
     backendBox_->setMinimumWidth(110);
-    ui->deviceBox->setMinimumWidth(110);
+    ui->deviceBox->setMinimumWidth(
+        QFontMetrics(ui->deviceBox->font()).horizontalAdvance(
+            QStringLiteral("GS32F379DA")) + 36);
     intervalSpin_->setMinimumWidth(110);
     ui->tckBox->setMinimumWidth(110);
     /* 顶部控件填满整条工具栏, 文本完整可见 */
@@ -676,11 +700,14 @@ void MainWindow::buildUi() {
         applyTheme(mode);
         menuBar()->setActiveAction(nullptr);   /* 清掉菜单栏残留高亮 */
     });
+
+
 }
 
 /* 第二组参数随后端切换: Uart 用波特率, 其它后端用 TCK */
 void MainWindow::applyBackendUi(const QString& backend) {
     const bool uart = (backend == "sci");
+    ui->labelTarget->setText("目标: ");
     ui->labelTck->setText(uart ? " 波特率: " : " TCK(MHz): ");
     const QString keep = ui->tckBox->currentText();
     QSignalBlocker block(ui->tckBox);
@@ -701,10 +728,37 @@ void MainWindow::applyBackendUi(const QString& backend) {
     refreshDeviceList();
 }
 
-/* 目标下拉: Uart 时枚举可用串口并默认选第一个; 其它后端固定 RV32 */
+/* 目标下拉: Uart 枚举串口; OpenOCD/J-Link/CAN 选择目标型号; 仿真固定 RV32 */
 void MainWindow::refreshDeviceList() {
     const QString backend = backendBox_->currentData().toString();
     const QString keep = ui->deviceBox->currentText().trimmed();
+
+    const bool chipBackend = (backend == "gslink" || backend == "jlink" ||
+                              backend == "can");
+    if (chipBackend) {
+        bool same = (ui->deviceBox->count() == kChipModelCount);
+        for (int i = 0; same && i < kChipModelCount; ++i)
+            same = (ui->deviceBox->itemText(i) ==
+                    QString::fromLatin1(kChipModels[i].name));
+        if (same) return;
+        QSignalBlocker block(ui->deviceBox);
+        ui->deviceBox->clear();
+        for (int i = 0; i < kChipModelCount; ++i)
+            ui->deviceBox->addItem(QString::fromLatin1(kChipModels[i].name));
+        /* 目标选择记忆: 优先保留当前值, 其次上次保存值, 首次默认 0039A */
+        QString want = keep;
+        QByteArray wantUtf8 = want.toUtf8();
+        if (!findChipModel(wantUtf8.constData())) {
+            want = QSettings().value("toolbar/target").toString();
+            wantUtf8 = want.toUtf8();
+            if (!findChipModel(wantUtf8.constData()))
+                want = QStringLiteral("GS32F0039A");
+        }
+        int idx = ui->deviceBox->findText(want);
+        if (idx < 0) idx = 0;
+        ui->deviceBox->setCurrentIndex(idx);
+        return;
+    }
 
     if (backend != "sci") {
         if (ui->deviceBox->count() == 1 &&
@@ -762,7 +816,7 @@ void MainWindow::applyDockSizes() {
 void MainWindow::appendLog(const QString& msg) {
     if (!logView_ || msg.isEmpty()) return;
     const QString ts = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
-    logView_->appendPlainText(QStringLiteral("[%1] %2").arg(ts, msg));
+    logView_->appendLine(QStringLiteral("[%1] %2").arg(ts, msg));
 }
 
 void MainWindow::beginTimelineSegment() {
@@ -806,8 +860,33 @@ void MainWindow::onConnectClicked() {
         }
         bExtra = sciConfigToJson(sciCfg);
     }
-    /* 目标固定 RV32 → 驱动内部识别名 riscv32 */
-    const QByteArray bDevice = QByteArrayLiteral("riscv32");
+    /* OpenOCD: 目标型号决定配置族, 驱动连接时读取实际 IDCODE 校验.
+     * 无配置的型号(厂商表中未归入系列)无法校验, 直接拒绝. */
+    if (backend == "gslink") {
+        const QByteArray modelUtf8 = ui->deviceBox->currentText().toUtf8();
+        const ChipModelDef* chip = findChipModel(modelUtf8.constData());
+        if (!chip) {
+            setStatus("连接失败: 未知目标 " + ui->deviceBox->currentText(), true);
+            return;
+        }
+        if (chip->idcode == 0) {
+            setStatus(QString("连接失败: 目标 %1 未提供 OpenOCD 配置，无法校验目标")
+                          .arg(QString::fromLatin1(chip->name)), true);
+            return;
+        }
+        bExtra = QString("{\"model\":\"%1\",\"idcode\":%2,\"taps\":%3,\"tap\":%4}")
+                     .arg(QString::fromLatin1(chip->name))
+                     .arg(QString::number(chip->idcode))
+                     .arg(chip->taps)
+                     .arg(chip->tap)
+                     .toUtf8();
+    }
+    /* OpenOCD/J-Link/CAN 把目标型号传给驱动; Uart/仿真仍用 riscv32 */
+    const bool chipDev = (backend == "gslink" || backend == "jlink" ||
+                          backend == "can");
+    const QByteArray bDevice = chipDev
+        ? ui->deviceBox->currentText().toUtf8()
+        : QByteArrayLiteral("riscv32");
     const QByteArray bIf = backend == "gslink" ? QByteArray("jtag")
                          : (backend == "sci" ? QByteArray("serial")
                          : (backend == "can" ? QByteArray("can") : QByteArray("swd")));
@@ -841,7 +920,11 @@ void MainWindow::onConnectClicked() {
             : envCfg;
         statusConn_->setText("已连接: Uart (" + where + ")");
         connText = "Uart (" + where + ")";
+    } else if (chipDev) {
+        connText = backendBox_->currentText() + " (" +
+                   ui->deviceBox->currentText() + ")";
     }
+    statusConn_->setText("已连接: " + connText);
     setStatus("已连接 " + connText);
 }
 

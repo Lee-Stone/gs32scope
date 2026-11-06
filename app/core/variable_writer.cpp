@@ -4,14 +4,6 @@
 #include <cmath>
 #include <cstring>
 
-namespace {
-QString fmt(double v, const VariableDef& d) {
-    if (isFloatType(d.type) && d.bitOffset < 0)
-        return QString::number(v, 'f', d.type == VariableDef::Double ? 6 : 3);
-    return QString::number(static_cast<qint64>(v));
-}
-} // namespace
-
 WriteResult VariableWriter::write(LinkDriver* link, const VariableDef& def, double value) {
     WriteResult r;
     if (!link || !link->isLoaded()) { r.error = QStringLiteral("驱动未加载"); return r; }
@@ -46,32 +38,9 @@ WriteResult VariableWriter::write(LinkDriver* link, const VariableDef& def, doub
         return r;
     }
 
-    /* 立即回读校验 */
-    uint8_t rb[8] = {};
-    if (!link->read(&region, 1, rb, def.size, 0)) {
-        r.error = QStringLiteral("写入已发送, 但回读失败: ") + link->lastErrorText();
-        return r;
-    }
-    if (def.bitOffset >= 0)
-        r.readback = gs32::decodeBitfield(def, gs32::readRaw(def, rb));
-    else
-        r.readback = gs32::decodeValue(def, rb);
-
-    bool same = false;
-    if (def.bitOffset >= 0) {
-        same = static_cast<uint64_t>(std::llround(r.readback)) == (wantRaw & fieldMask);
-    } else if (isFloatType(def.type)) {
-        const double tol = std::max(1e-6, std::fabs(value) * 1e-5);
-        same = std::fabs(r.readback - value) <= tol;
-    } else {
-        same = static_cast<qint64>(std::llround(r.readback)) ==
-               static_cast<qint64>(std::llround(value));
-    }
-    if (!same) {
-        r.error = QStringLiteral("回读不一致(写入 %1, 回读 %2)")
-                      .arg(fmt(value, def), fmt(r.readback, def));
-        return r;
-    }
+    /* 写入后不做阻塞回读: 目标程序可能立即更新变量(计数器/节拍等),
+     * 回读不一致不代表写入失败. 写事务成功即返回, 当前值由采样刷新. */
+    r.readback = value;
     r.ok = true;
     return r;
 }

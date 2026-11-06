@@ -258,12 +258,20 @@ int RiscvDebug::sbaReadN(uint32_t addr, uint8_t width, uint32_t* data) {
 }
 
 int RiscvDebug::sbaWriteN(uint32_t addr, uint8_t width, uint32_t value) {
-    if (setSbAccess(width)) return GS32_ERR_WRITE;
-    if (dmiWriteReg(DM_SBADDRESS0, addr)) return GS32_ERR_WRITE;
-    if (dmiWriteReg(DM_SBDATA0, value)) return GS32_ERR_WRITE;
-    /* 等写完成: 上笔未完成时写下一笔会置 sbbusyerror(实测粘滞的根源) */
-    if (sbWaitIdle()) return GS32_ERR_WRITE;
-    return GS32_OK;
+    /* 写事务不能带 sbreadonaddr: 写地址会触发一次读, 读占住 SBA,
+     * 随后的 SBDATA0 写被忽略且只置粘滞 sbbusyerror(37xA 实测写入无效).
+     * 写前关闭读触发, 写完恢复读配置. */
+    const uint32_t writeCfg = (uint32_t)width << SBCS_SBACCESS_SHIFT;
+    if (dmiWriteReg(DM_SBCS, writeCfg)) { curSbAccess_ = -1; return GS32_ERR_WRITE; }
+    curSbAccess_ = -1;
+    int rc = GS32_OK;
+    if (dmiWriteReg(DM_SBADDRESS0, addr)) rc = GS32_ERR_WRITE;
+    else if (dmiWriteReg(DM_SBDATA0, value)) rc = GS32_ERR_WRITE;
+    else if (sbWaitIdle()) rc = GS32_ERR_WRITE;
+    /* 恢复采样读取使用的 readonaddr(+突发)配置 */
+    if (dmiWriteReg(DM_SBCS, sbcsCfg_(2))) { curSbAccess_ = -1; return GS32_ERR_WRITE; }
+    curSbAccess_ = 2;
+    return rc;
 }
 
 /* 批量快速路径: 连续对齐 32bit 字块读取。

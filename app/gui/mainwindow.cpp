@@ -1512,9 +1512,8 @@ bool MainWindow::writeVariable(const QString& path, double value, bool confirm) 
         return false;
     }
     model_->setLeafCurrent(li, r.readback);
-    setStatus(QString("写入成功: %1 = %2 (回读 %3)")
-                  .arg(path, QString::number(value, 'g', 9),
-                       QString::number(r.readback, 'g', 9)));
+    setStatus(QString("写入成功: %1 = %2")
+                  .arg(path, QString::number(value, 'g', 9)));
     return true;
 }
 

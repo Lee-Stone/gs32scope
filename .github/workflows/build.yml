@@ -16,6 +16,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write        # 创建 GitHub Release / tag
     env:
       VERSION: ${{ github.event.inputs.version || 'V1.0.0' }}
     steps:
@@ -32,6 +34,7 @@ jobs:
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-qt6-svg
+            mingw-w64-ucrt-x86_64-libftdi
 
       - name: Build application
         shell: msys2 {0}
@@ -89,6 +92,9 @@ jobs:
 
           cp drivers/gs32link_gslink.dll "$DIST/drivers/"
           cp drivers/gs32link_sci.dll "$DIST/drivers/"
+          # OpenOCD 后端的 libftdi/libusb 兜底(设备绑 WinUSB/Hbird 驱动时用)
+          cp "$MINGW_PREFIX/bin/libftdi1.dll" "$DIST/drivers/" 2>/dev/null || true
+          cp "$MINGW_PREFIX/bin/libusb-1.0.dll" "$DIST/drivers/" 2>/dev/null || true
 
           cat > "$DIST/README.txt" <<EOF
           GS32Scope $VERSION
@@ -105,3 +111,27 @@ jobs:
           name: "GS32Scope ${{ env.VERSION }}"
           path: dist/
           if-no-files-found: error
+
+      - name: Create release archive
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $src = "dist/GS32Scope $env:VERSION"
+          if (-not (Test-Path $src)) { throw "release folder missing: $src" }
+          Compress-Archive -Path "$src/*" -DestinationPath "GS32Scope-$env:VERSION.zip" -Force
+          Get-Item "GS32Scope-$env:VERSION.zip" | Select-Object Name, Length
+
+      - name: Publish GitHub release
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: GS32Scope ${{ env.VERSION }}
+          generate_release_notes: true
+          body: |
+            GS32Scope ${{ env.VERSION }} — built from ${{ github.sha }}
+
+            通讯接口: OpenOCD(JTAG) / Uart
+            目标侧 SDK 与完整用户手册不随本包提供。
+          files: GS32Scope-${{ env.VERSION }}.zip
+

@@ -7,6 +7,7 @@
 #include "variable_dialog.h"
 #include "gui/log_view.h"
 #include "chip_models.h"
+#include "chip_partinfo.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -874,11 +875,18 @@ void MainWindow::onConnectClicked() {
                           .arg(QString::fromLatin1(chip->name)), true);
             return;
         }
-        bExtra = QString("{\"model\":\"%1\",\"idcode\":%2,\"taps\":%3,\"tap\":%4}")
+        /* 精确型号校验: 把该型号的期望部件号签名一并下发, 驱动连接后
+         * 读芯片 OTP 信息块比对; 表里没有的型号 pseq=0, 跳过精确校验. */
+        const ChipPartInfo* pinfo = findChipPartInfo(chip->name);
+        bExtra = QString("{\"model\":\"%1\",\"idcode\":%2,\"taps\":%3,\"tap\":%4,"
+                         "\"pseq\":%5,\"pfreq\":%6,\"pflash\":%7}")
                      .arg(QString::fromLatin1(chip->name))
                      .arg(QString::number(chip->idcode))
                      .arg(chip->taps)
                      .arg(chip->tap)
+                     .arg(pinfo ? pinfo->devSeq : 0)
+                     .arg(pinfo ? pinfo->freqMHz : 0)
+                     .arg(pinfo ? pinfo->flashIdx : 0)
                      .toUtf8();
     }
     /* OpenOCD/J-Link/CAN 把目标型号传给驱动; Uart/仿真仍用 riscv32 */

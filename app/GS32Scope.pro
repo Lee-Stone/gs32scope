@@ -66,12 +66,14 @@ win32:LIBS += -lwinmm
 # 这里先建目录再逐文件覆盖。
 win32 {
     DESTDIR = $$OUT_PWD
-    QMAKE_POST_LINK += -$(MKDIR) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
-    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_sim.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
-    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_jlink.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
-    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_gslink.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
-    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_sci.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
-    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_path($$PWD/../drivers/gs32link_can.dll) $$shell_path($$OUT_PWD/drivers) $$escape_expand(\\n\\t)
+    # 源码路径可能含空格(如 C:\Users\Jianrong Lin\...), 路径必须加引号, 否则 cmd 会断在空格处
+    DRIVERS_DST = $$shell_quote($$shell_path($$OUT_PWD/drivers))
+    QMAKE_POST_LINK += -$(MKDIR) $$DRIVERS_DST $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_quote($$shell_path($$PWD/../drivers/gs32link_sim.dll)) $$DRIVERS_DST $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_quote($$shell_path($$PWD/../drivers/gs32link_jlink.dll)) $$DRIVERS_DST $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_quote($$shell_path($$PWD/../drivers/gs32link_gslink.dll)) $$DRIVERS_DST $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_quote($$shell_path($$PWD/../drivers/gs32link_sci.dll)) $$DRIVERS_DST $$escape_expand(\\n\\t)
+    QMAKE_POST_LINK += -$(COPY_FILE) $$shell_quote($$shell_path($$PWD/../drivers/gs32link_can.dll)) $$DRIVERS_DST $$escape_expand(\\n\\t)
 }
 
 # shadow build: 源码目录保持干净, 构建产物在 build/

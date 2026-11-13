@@ -28,6 +28,8 @@ set_target_properties(gs32link_jlink PROPERTIES
 option(GS32LINK_GSLINK_USE_LIBMPSSE "Use FTDI libMPSSE.dll instead of raw D2XX MPSSE" OFF)
 add_library(gs32link_gslink SHARED
     drivers/gslink/gslink_driver.cpp
+    drivers/gslink/ftdi_jtag.cpp
+    drivers/gslink/riscv_debug.cpp
 )
 target_include_directories(gs32link_gslink PRIVATE ${GS32LINK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/common)
 target_compile_definitions(gs32link_gslink PRIVATE GS32LINK_BUILDING)

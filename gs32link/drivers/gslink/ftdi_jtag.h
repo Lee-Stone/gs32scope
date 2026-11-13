@@ -13,6 +13,7 @@
  *  - Update-DR 后插入 idleCycles_ 个 IDLE 周期(dtmcs.idle 时序, 由层2设置)
  */
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -40,10 +41,33 @@ struct D2xxApi {
     bool load(std::string& err);
 };
 
+/* libftdi/libusb 后端: 设备绑定在 WinUSB(Hbird) 驱动时 D2XX 看不到, 走这里 */
+struct LibftdiApi {
+    HMODULE mod = nullptr;
+    void* (*New)(void) = nullptr;
+    void  (*Free)(void*) = nullptr;
+    int   (*Init)(void*) = nullptr;
+    int   (*SetInterface)(void*, int) = nullptr;
+    int   (*UsbOpen)(void*, int, int) = nullptr;
+    int   (*UsbClose)(void*) = nullptr;
+    int   (*UsbReset)(void*) = nullptr;
+    int   (*PurgeBuffers)(void*) = nullptr;
+    int   (*SetBitMode)(void*, unsigned char, unsigned char) = nullptr;
+    int   (*SetLatency)(void*, unsigned char) = nullptr;
+    int   (*Write)(void*, const unsigned char*, int) = nullptr;
+    int   (*Read)(void*, unsigned char*, int) = nullptr;
+    const char* (*ErrorString)(void*) = nullptr;
+
+    bool load(std::string& err);
+};
+
 class FtdiJtag {
 public:
     /* 打开指定描述的端口(port 为空/未找到时回退设备0)并完成 MPSSE 初始化 */
     bool open(uint32_t speed_khz, const char* port, std::string& err);
+    /* 设备绑定在 WinUSB(Hbird) 等非 FTDIBUS 驱动上时, 用 libftdi+libusb 打开 */
+    bool openLibusb(uint32_t speed_khz, const char* port, std::string& err);
+    bool usingLibusb() const { return libusb_; }
     /* 枚举 FTDI 设备描述(端口下拉用); false = D2XX 不可用 */
     bool listPorts(std::vector<std::string>& out);
     void close();
@@ -93,6 +117,14 @@ private:
     bool scanDRRaw(uint32_t bits, const uint8_t* tdi, uint8_t* tdo);
 
     D2xxApi api_;
+    LibftdiApi lib_;              /* libftdi/libusb 后端(按需加载) */
+    bool libusb_ = false;         /* 当前连接是否走 libusb */
+    void* ftctx_ = nullptr;       /* libftdi context */
+    /* 设备读写/清缓冲/关闭的抽象, 两个后端各填一套 */
+    std::function<int(const void*, unsigned long, unsigned long*)> devWriteFn_;
+    std::function<int(void*, unsigned long, unsigned long*)> devReadFn_;
+    std::function<void()> devPurgeFn_;
+    std::function<void()> devCloseFn_;
     FT_HANDLE ft_ = nullptr;
     int irLen_ = 5;        /* IR 长度(probe 可修正) */
     int tapCount_ = 1;     /* JTAG 链 TAP 总数 */

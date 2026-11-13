@@ -61,6 +61,7 @@ constexpr uint8_t kCmdStreamCfg   = 0x40;
 constexpr uint8_t kCmdStreamStart = 0x41;
 constexpr uint8_t kCmdStreamStop  = 0x42;
 constexpr uint8_t kCmdStreamRead  = 0x44;
+constexpr uint8_t kCmdStreamReadN = 0x45;   /* burst: 1 request, N responses */
 constexpr uint8_t kStsOk        = 0x00;
 constexpr uint8_t kStsError     = 0x80;     /* FMSTR_STSF_ERROR */
 constexpr uint8_t kStsVarLen    = 0x40;     /* FMSTR_STSF_VARLEN */
@@ -68,6 +69,8 @@ constexpr uint8_t kWrmFlagNone  = 0x00;
 
 /* FreeMASTER 串口响应上限 252 字节(含 status/len), 请求侧保守取 200/128 */
 constexpr size_t kMaxReadChunk  = 200;
+/* STREAM 每帧上限: 240 数据 + 2 个 ULEB 头, 不超过响应 252 字节 */
+constexpr uint32_t kStreamMaxBytes = 244;
 constexpr size_t kMaxWriteChunk = 128;
 constexpr size_t kRxBufSize     = 1024;
 
@@ -102,6 +105,10 @@ struct SciState {
         uint32_t readSeq = 0;
         uint64_t seq = 0;
         int64_t t0Ns = 0;
+        /* 0x45 burst: 一次请求读多帧, 摊薄 VCP 16ms 延迟 */
+        uint32_t burst = 3;
+        bool useBurst = true;
+        int burstFails = 0;
     } stream;
 };
 
@@ -452,6 +459,57 @@ bool streamReadLocked(SciState* s, uint32_t readSeq, uint32_t maxBytes,
     return true;
 }
 
+/* Burst STREAM_READ (0x45): one request answered with `count` frames.
+ * Each frame carries writeSeq, dropped and raw samples, back to back. */
+bool streamReadNLocked(SciState* s, uint32_t readSeq, uint32_t maxBytes, uint32_t count,
+                       uint32_t* firstWriteSeq, uint32_t* firstDropped,
+                       uint32_t* totalDropped, std::vector<uint8_t>* data) {
+    std::vector<uint8_t> payload;
+    ulebEncode(payload, readSeq);
+    ulebEncode(payload, maxBytes);
+    ulebEncode(payload, count);
+
+    std::vector<uint8_t> wire;
+    buildFrame(kCmdStreamReadN, payload, &wire);
+    s->rx.clear();
+    s->rxPos = 0;
+    if (!writeAll(s, wire.data(), wire.size())) return false;
+
+    data->clear();
+    *totalDropped = 0U;
+    *firstWriteSeq = 0U;
+    *firstDropped = 0U;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t status = 0;
+        std::vector<uint8_t> resp;
+        if (!readFrame(s, &status, &resp)) return false;
+        if ((status & kStsError) != 0) {
+            s->err.set(GS32_ERR_READ, "STREAM 读取返回错误码 0x" +
+                                          std::to_string(unsigned(status)));
+            return false;
+        }
+        if (status != (kStsOk | kStsVarLen)) {
+            s->err.set(GS32_ERR_READ, "STREAM 响应状态异常 0x" +
+                                          std::to_string(unsigned(status)));
+            return false;
+        }
+        size_t pos = 0U;
+        uint32_t w = 0U;
+        uint32_t dropped = 0U;
+        if (!ulebDecode(resp, &pos, &w) || !ulebDecode(resp, &pos, &dropped)) {
+            s->err.set(GS32_ERR_READ, "STREAM 响应头无效");
+            return false;
+        }
+        if (i == 0U) {
+            *firstWriteSeq = w;
+            *firstDropped = dropped;
+        }
+        *totalDropped += dropped;
+        data->insert(data->end(), resp.begin() + std::ptrdiff_t(pos), resp.end());
+    }
+    return true;
+}
+
 void streamThread(SciState* s) {
     using namespace std::chrono;
     s->stream.t0Ns = duration_cast<nanoseconds>(
@@ -459,24 +517,42 @@ void streamThread(SciState* s) {
 
     while (s->stream.running.load()) {
         uint32_t writeSeq = 0U;
-        uint32_t dropped = 0U;
+        uint32_t firstDropped = 0U;
+        uint32_t totalDropped = 0U;
         std::vector<uint8_t> data;
         bool ok;
+        const bool burst = s->stream.useBurst;
         {
             std::lock_guard<std::mutex> lk(s->mtx);
-            ok = streamReadLocked(s, s->stream.readSeq, 176U, &writeSeq, &dropped, &data);
+            if (burst) {
+                ok = streamReadNLocked(s, s->stream.readSeq, kStreamMaxBytes,
+                                       s->stream.burst, &writeSeq, &firstDropped,
+                                       &totalDropped, &data);
+            } else {
+                ok = streamReadLocked(s, s->stream.readSeq, kStreamMaxBytes,
+                                      &writeSeq, &firstDropped, &data);
+                totalDropped = firstDropped;
+            }
         }
         if (!ok) {
+            /* 目标端不支持 0x45 时自动退回单帧读取(旧固件兼容) */
+            if (burst && ++s->stream.burstFails >= 2) {
+                s->stream.useBurst = false;
+            }
             std::this_thread::sleep_for(milliseconds(5));
             continue;
         }
+        s->stream.burstFails = 0;
 
         const uint32_t sampleBytes = s->stream.sampleBytes;
         if (sampleBytes == 0U) break;
         const uint32_t samples = uint32_t(data.size()) / sampleBytes;
+        /* 目标端返回的第一个样本是 readSeq + firstDropped, 时间戳必须跟着
+         * 挪, 否则丢样时整块时间提前, 与上一块重叠被画成竖线. */
         const uint64_t t0 = uint64_t(s->stream.t0Ns) +
-                            uint64_t(s->stream.readSeq) * uint64_t(s->stream.periodNs);
-        s->stream.readSeq += dropped + samples;
+                            uint64_t(s->stream.readSeq + firstDropped) *
+                                uint64_t(s->stream.periodNs);
+        s->stream.readSeq += totalDropped + samples;
 
         if (samples == 0U) {
             std::this_thread::sleep_for(milliseconds(2));
@@ -492,7 +568,7 @@ void streamThread(SciState* s) {
         hdr.period_ns = s->stream.periodNs;
         hdr.sample_count = uint16_t(samples);
         hdr.region_count = uint16_t(s->stream.regionCount);
-        hdr.flags = (dropped != 0U) ? GS32_BF_TRUNCATED : 0U;
+        hdr.flags = (totalDropped != 0U) ? GS32_BF_TRUNCATED : 0U;
         hdr.payload_size = uint32_t(data.size());
 
         if (s->stream.cb) {
@@ -664,7 +740,7 @@ GS32LINK_EXPORT int gs32_config_stream(gs32_handle_t h, uint32_t period_ns,
     s->stream.sampleBytes = sb;
     s->stream.capacity = cap;
     s->stream.regionCount = count;
-    uint32_t perBlock = 176U / sb;
+    uint32_t perBlock = kStreamMaxBytes / sb;
     if (perBlock == 0U) perBlock = 1U;
     s->stream.maxSamples = perBlock;
     (void)policy;

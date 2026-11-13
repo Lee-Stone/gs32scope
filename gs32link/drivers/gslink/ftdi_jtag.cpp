@@ -109,6 +109,63 @@ bool FtdiJtag::listPorts(std::vector<std::string>& out) {
 }
 
 /* ---- 打开/关闭 ---- */
+static void libftdiAnchor(void) {}
+
+bool LibftdiApi::load(std::string& err) {
+    if (mod) return true;
+    /* libftdi1.dll 依赖 libusb-1.0.dll, 两者都放在驱动 DLL 同目录.
+     * LoadLibrary 不会自动搜本模块所在目录(只有隐式依赖才会), 所以先按
+     * 本 DLL 的路径拼出全路径再加载. */
+    HMODULE self = nullptr;
+    char selfPath[MAX_PATH] = {0};
+    std::string dir;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&libftdiAnchor, &self) && self) {
+        const DWORD n = GetModuleFileNameA(self, selfPath, MAX_PATH);
+        if (n > 0) {
+            std::string p2(selfPath, n);
+            const size_t slash = p2.find_last_of("\\/");
+            if (slash != std::string::npos) dir = p2.substr(0, slash + 1);
+        }
+    }
+    /* 依赖解析不会搜 DLL 自身目录: 先把 libusb-1.0.dll 按全路径加载好,
+     * 再加载 libftdi1.dll, 否则 LoadLibrary 返回 126(MOD_NOT_FOUND). */
+    if (!dir.empty()) (void)LoadLibraryA((dir + "libusb-1.0.dll").c_str());
+    if (!dir.empty()) mod = LoadLibraryA((dir + "libftdi1.dll").c_str());
+    if (!mod) mod = LoadLibraryA("libftdi1.dll");
+    if (!mod) {
+        err = "libftdi1.dll not found (需与 gs32link_gslink.dll 同目录)";
+        return false;
+    }
+    struct Entry { const char* name; void** slot; };
+    Entry entries[] = {
+        {"ftdi_new",              (void**)&New},
+        {"ftdi_free",             (void**)&Free},
+        {"ftdi_init",             (void**)&Init},
+        {"ftdi_set_interface",    (void**)&SetInterface},
+        {"ftdi_usb_open",         (void**)&UsbOpen},
+        {"ftdi_usb_close",        (void**)&UsbClose},
+        {"ftdi_usb_reset",        (void**)&UsbReset},
+        {"ftdi_usb_purge_buffers",(void**)&PurgeBuffers},
+        {"ftdi_set_bitmode",      (void**)&SetBitMode},
+        {"ftdi_set_latency_timer",(void**)&SetLatency},
+        {"ftdi_write_data",       (void**)&Write},
+        {"ftdi_read_data",        (void**)&Read},
+        {"ftdi_get_error_string", (void**)&ErrorString},
+    };
+    for (auto& e : entries) {
+        *e.slot = (void*)GetProcAddress(mod, e.name);
+        if (!*e.slot) {
+            err = std::string("libftdi1.dll missing export: ") + e.name;
+            FreeLibrary(mod);
+            mod = nullptr;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool FtdiJtag::open(uint32_t speed_khz, const char* port, std::string& err) {
     if (!api_.load(err)) return false;
     bool ok = false;
@@ -155,14 +212,105 @@ bool FtdiJtag::open(uint32_t speed_khz, const char* port, std::string& err) {
     api_.Purge(ft_, FT_PURGE_RX);
     logInfo("[open] MPSSE init: div=%u written=%lu cfg=[%s]\n", div, w,
             hexDump(mpsseCfg, sizeof(mpsseCfg)).c_str());
+    libusb_ = false;
+    devWriteFn_ = [this](const void* b, unsigned long n, unsigned long* wr) -> int {
+        return api_.Write(ft_, (void*)b, n, wr) == FT_OK ? 0 : -1;
+    };
+    devReadFn_ = [this](void* b, unsigned long n, unsigned long* rd) -> int {
+        return api_.Read(ft_, b, n, rd) == FT_OK ? 0 : -1;
+    };
+    devPurgeFn_ = [this]() { api_.Purge(ft_, FT_PURGE_RX); };
+    devCloseFn_ = [this]() {
+        if (ft_) api_.Close(ft_);
+        ft_ = nullptr;
+        if (api_.mod) FreeLibrary(api_.mod);
+        api_.mod = nullptr;
+    };
+    return true;
+}
+
+/* 兜底后端: 设备绑定在 WinUSB(Nuclei "Hbird FTDI Driver" 等)时 D2XX 列表里
+ * 根本没有这块板, FT_Open(0) 会开到别的 FTDI. libftdi 走 libusb, 能直接打开. */
+bool FtdiJtag::openLibusb(uint32_t speed_khz, const char* port, std::string& err) {
+    (void)port;
+    if (!lib_.load(err)) return false;
+    void* ctx = lib_.New();
+    if (ctx && lib_.Init) {
+        if (lib_.Init(ctx) != 0) ctx = nullptr;   /* ftdi_new 通常已 init, 失败则放弃 */
+    }
+    if (!ctx) {
+        err = "libftdi: context alloc failed";
+        return false;
+    }
+    /* FT2232H 必须先选接口 A 再 open */
+    if (lib_.SetInterface) (void)lib_.SetInterface(ctx, 1 /* INTERFACE_A */);
+    if (lib_.UsbOpen(ctx, 0x0403, 0x6010) != 0) {
+        err = std::string("libftdi: 未找到 FT2232H (0x0403:0x6010), ") +
+              (lib_.ErrorString ? lib_.ErrorString(ctx) : "");
+        lib_.Free(ctx);
+        return false;
+    }
+    (void)lib_.SetLatency(ctx, 1);
+    if (lib_.UsbReset(ctx) != 0 || lib_.PurgeBuffers(ctx) != 0 ||
+        lib_.SetBitMode(ctx, 0x0B, 0x02) != 0) {
+        err = "libftdi: MPSSE init failed";
+        lib_.UsbClose(ctx);
+        lib_.Free(ctx);
+        return false;
+    }
+    Sleep(50);
+    const uint32_t div = speed_khz >= 30000
+                       ? 0 : (30000 + speed_khz - 1) / speed_khz - 1;
+    const uint8_t mpsseCfg[] = {
+        0x85, 0x8A,
+        0x80, 0x2A, 0x2B,
+        0x86, (uint8_t)(div & 0xFF), (uint8_t)(div >> 8),
+        0x87,
+    };
+    (void)lib_.Write(ctx, mpsseCfg, (int)sizeof(mpsseCfg));
+    (void)lib_.PurgeBuffers(ctx);
+    logInfo("[open] libftdi/libusb MPSSE init: div=%u\n", div);
+
+    ftctx_ = ctx;
+    ft_ = ctx;
+    libusb_ = true;
+    devWriteFn_ = [this](const void* b, unsigned long n, unsigned long* wr) -> int {
+        const int r = lib_.Write(ftctx_, (const unsigned char*)b, (int)n);
+        if (r < 0) { *wr = 0; return -1; }
+        *wr = (unsigned long)r;
+        return 0;
+    };
+    devReadFn_ = [this](void* b, unsigned long n, unsigned long* rd) -> int {
+        const int r = lib_.Read(ftctx_, (unsigned char*)b, (int)n);
+        if (r < 0) { *rd = 0; return -1; }
+        *rd = (unsigned long)r;
+        return 0;
+    };
+    devPurgeFn_ = [this]() { (void)lib_.PurgeBuffers(ftctx_); };
+    devCloseFn_ = [this]() {
+        if (ftctx_) {
+            (void)lib_.UsbClose(ftctx_);
+            lib_.Free(ftctx_);
+            ftctx_ = nullptr;
+        }
+        if (lib_.mod) {
+            FreeLibrary(lib_.mod);
+            lib_.mod = nullptr;
+        }
+        ft_ = nullptr;
+    };
     return true;
 }
 
 void FtdiJtag::close() {
-    if (ft_) api_.Close(ft_);
+    if (devCloseFn_) devCloseFn_();
+    devWriteFn_ = nullptr;
+    devReadFn_ = nullptr;
+    devPurgeFn_ = nullptr;
+    devCloseFn_ = nullptr;
     ft_ = nullptr;
-    if (api_.mod) FreeLibrary(api_.mod);
-    api_.mod = nullptr;
+    ftctx_ = nullptr;
+    libusb_ = false;
     curIr_ = -1;
 }
 
@@ -171,7 +319,7 @@ bool FtdiJtag::writeFull_(const void* buf, uint32_t n) {
     uint32_t sent = 0;
     while (sent < n) {
         unsigned long w = 0;
-        if (api_.Write(ft_, (void*)((const char*)buf + sent), n - sent, &w) != FT_OK)
+        if (!devWriteFn_ || devWriteFn_((const char*)buf + sent, n - sent, &w) != 0)
             return false;
         if (!w) return false;
         sent += (uint32_t)w;
@@ -183,7 +331,7 @@ bool FtdiJtag::readFull_(void* buf, uint32_t n) {
     uint32_t got = 0;
     while (got < n) {
         unsigned long r = 0;
-        if (api_.Read(ft_, (char*)buf + got, n - got, &r) != FT_OK) return false;
+        if (!devReadFn_ || devReadFn_((char*)buf + got, n - got, &r) != 0) return false;
         if (!r) return false;
         got += (uint32_t)r;
     }
@@ -233,7 +381,7 @@ bool FtdiJtag::tmsShift_(const std::vector<bool>& tms, bool /*tdi*/) {
     cmd.push_back(0x87);
     logDbg("[tx TMS %zu bits, %zu B] %s\n", n, cmd.size(),
         hexDump(cmd.data(), cmd.size()).c_str());
-    api_.Purge(ft_, FT_PURGE_RX);
+    if (devPurgeFn_) devPurgeFn_();
     return writeFull_(cmd.data(), (uint32_t)cmd.size());
 }
 
@@ -248,7 +396,7 @@ bool FtdiJtag::tmsShiftLast_(bool tdi, uint8_t* tdoBit) {
         0x87,
     };
     logDbg("[tx LAST] %02X 00 %02X 87\n", cmd[0], cmd[2]);
-    api_.Purge(ft_, FT_PURGE_RX);
+    if (devPurgeFn_) devPurgeFn_();
     if (!writeFull_(cmd, sizeof(cmd))) return false;
     if (read) {
         uint8_t rx = 0;
@@ -273,7 +421,7 @@ bool FtdiJtag::dataShift_(const uint8_t* tdiBytes, uint32_t bits, uint8_t* tdoOu
     cmd.push_back(0x87);
     logDbg("[tx DATA %u bits, %zu B] %s\n", bits, cmd.size(),
         hexDump(cmd.data(), cmd.size()).c_str());
-    api_.Purge(ft_, FT_PURGE_RX);
+    if (devPurgeFn_) devPurgeFn_();
     if (!writeFull_(cmd.data(), (uint32_t)cmd.size())) return false;
     if (read) {
         std::vector<uint8_t> rx(bits);

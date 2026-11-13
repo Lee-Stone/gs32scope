@@ -112,11 +112,19 @@ GS32LINK_EXPORT int gs32_open(const gs32_config_t* cfg, gs32_handle_t* out) {
             port = portStr.c_str();
         }
     }
-    if (!s->jtag.open(cfg->speed_khz ? cfg->speed_khz : 4000, port, err)) {
-        g_global_error = err;
-        gs32::logInfo("[open] %s\n", err.c_str());
-        delete s;
-        return GS32_ERR_CONNECT;
+    const uint32_t speed = cfg->speed_khz ? cfg->speed_khz : 4000;
+    if (!s->jtag.open(speed, port, err)) {
+        /* D2XX 打不开(设备被绑到 WinUSB/Nuclei "Hbird FTDI Driver" 等驱动
+         * 时 D2XX 列表里没有这块板): 改用 libftdi+libusb 直接按 VID/PID 打开 */
+        std::string e2;
+        gs32::logInfo("[open] D2XX open failed (%s), trying libftdi/libusb\n", err.c_str());
+        if (!s->jtag.openLibusb(speed, port, e2)) {
+            g_global_error = err + " / " + e2;
+            gs32::logInfo("[open] %s\n", g_global_error.c_str());
+            delete s;
+            return GS32_ERR_CONNECT;
+        }
+        gs32::logInfo("[open] using libftdi/libusb backend\n");
     }
 
     /* 目标校验: 型号 + 期望 IDCODE 来自宿主 extra JSON */
@@ -137,13 +145,60 @@ GS32LINK_EXPORT int gs32_open(const gs32_config_t* cfg, gs32_handle_t* out) {
     s->dbg.setExpectedChip(expectedId, model.c_str());
 
     /* 连接即完成 TAP/DM 初始化并校验目标; 失败则连接失败 */
-    const int initRc = s->dbg.ensureReady();
+    int initRc = s->dbg.ensureReady();
+    if (initRc != GS32_OK && !s->jtag.usingLibusb()) {
+        /* D2XX 可能开到了另一台 FTDI 设备(本机插了多个 FTDI 时就是这种情况):
+         * 关掉, 用 libftdi 直连 0x0403:0x6010 再试一次. */
+        std::string e2;
+        gs32::logInfo("[open] D2XX 连接失败, 改用 libftdi/libusb 重试\n");
+        s->jtag.close();
+        if (s->jtag.openLibusb(speed, port, e2)) {
+            initRc = s->dbg.ensureReady();
+        } else {
+            gs32::logInfo("[open] libftdi fallback failed: %s\n", e2.c_str());
+        }
+    }
     if (initRc != GS32_OK) {
         g_global_error = s->err.text();
         gs32::logInfo("[open] %s\n", g_global_error.c_str());
         s->jtag.close();
         delete s;
         return initRc;
+    }
+    /* 精确型号校验: 芯片 OTP 信息块 0x1FFF40D0..
+     *   [2] = Flash 档位, [3] = SYS_Freq(MHz), [6..7] = DEV_Seq(大端)
+     * 期望值由上位机按型号表放在 extra JSON (pseq/pfreq/pflash);
+     * pseq==0 表示该型号未采集样本, 跳过精确校验(仍做 IDCODE 校验). */
+    const uint32_t expSeq = jsonUint(cfg->extra, "pseq");
+    if (expSeq) {
+        const uint32_t expFreq = jsonUint(cfg->extra, "pfreq");
+        const uint32_t expFlash = jsonUint(cfg->extra, "pflash");
+        uint8_t info[8] = {0};
+        const int rc = s->dbg.readMem(0x1FFF40D0u, info, sizeof(info));
+        if (rc == GS32_OK) {
+            const uint32_t actSeq = (uint32_t(info[6]) << 8) | uint32_t(info[7]);
+            const uint32_t actFreq = uint32_t(info[3]) | (uint32_t(info[4]) << 8);
+            const uint32_t actFlash = info[2];
+            if (actSeq != expSeq || actFreq != expFreq || actFlash != expFlash) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "目标不匹配: 选择 %s (DEV_Seq=0x%04X Flash=%u Freq=%uMHz), "
+                              "实际 DEV_Seq=0x%04X Flash=%u Freq=%uMHz",
+                              model.c_str(), unsigned(expSeq), unsigned(expFlash),
+                              unsigned(expFreq), unsigned(actSeq), unsigned(actFlash),
+                              unsigned(actFreq));
+                g_global_error = buf;
+                s->err.set(GS32_ERR_CONNECT, buf);
+                gs32::logInfo("[open] %s\n", buf);
+                s->jtag.close();
+                delete s;
+                return GS32_ERR_CONNECT;
+            }
+            gs32::logInfo("[open] partnumber ok: DEV_Seq=0x%04X Flash=%u Freq=%uMHz\n",
+                          unsigned(actSeq), unsigned(actFlash), unsigned(actFreq));
+        } else {
+            gs32::logInfo("[open] partnumber read failed rc=%d, skip exact check\n", rc);
+        }
     }
     s->err.clear();
     *out = s;

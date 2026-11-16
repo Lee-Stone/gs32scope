@@ -758,6 +758,10 @@ GS32LINK_EXPORT int gs32_config_stream(gs32_handle_t h, uint32_t period_ns,
     (void)policy;
     s->stream.readSeq = 0U;
     s->stream.seq = 0U;
+    /* 每次重新配置都重新尝试 burst: 上一次在低周期(例如 1kHz 带宽不够)下
+     * 失败把 useBurst 关掉后, 换回 500Hz 必须重新启用, 否则会一直停在单帧. */
+    s->stream.useBurst = true;
+    s->stream.burstFails = 0;
     s->err.clear();
     return GS32_OK;
 }

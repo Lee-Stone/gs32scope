@@ -73,6 +73,8 @@ constexpr size_t kMaxReadChunk  = 200;
 constexpr uint32_t kStreamMaxBytes = 244;
 constexpr size_t kMaxWriteChunk = 128;
 constexpr size_t kRxBufSize     = 1024;
+/* 单次响应的等待预算: 目标端处理请求要几毫秒到几十毫秒 */
+constexpr int    kRxWaitMs      = 150;
 
 struct SciState {
     ErrorState err;
@@ -282,17 +284,27 @@ bool fillRx(SciState* s) {
         s->rx.resize(size_t(r));
         return true;
     }
-    DWORD got = 0;
-    if (!ReadFile(s->com, s->rx.data(), DWORD(s->rx.size()), &got, nullptr)) {
-        s->err.set(GS32_ERR_READ, "串口读失败");
-        return false;
+    /* COMMTIMEOUTS 用的是"立即返回"模式(ReadIntervalTimeout=MAXDWORD),
+     * 没数据时 ReadFile 立刻返回 0 字节. 目标端处理请求需要几毫秒到几十毫秒,
+     * 直接当超时会把正常响应判死(1kHz 下主循环被采样中断抢占更明显). */
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kRxWaitMs);
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(s->com, s->rx.data(), DWORD(s->rx.size()), &got, nullptr)) {
+            s->err.set(GS32_ERR_READ, "串口读失败");
+            return false;
+        }
+        if (got > 0) {
+            s->rx.resize(got);
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            s->err.set(GS32_ERR_TIMEOUT, "串口读超时");
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (got == 0) {
-        s->err.set(GS32_ERR_TIMEOUT, "串口读超时");
-        return false;
-    }
-    s->rx.resize(got);
-    return true;
 }
 
 bool nextByte(SciState* s, uint8_t* out) {

@@ -1009,7 +1009,7 @@ void MainWindow::onStartClicked() {
     actStart_->setText("停止采样");
     actSingle_->setEnabled(false);
     intervalSpin_->setEnabled(false);
-    setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
+    setStatus(QString("采样中: %1 变量 @ %2 Hz (%3)")
                   .arg(model_->leafCount())
                   .arg(rateHz())
                   .arg(engine_->isStreaming() ? "STREAM" : "POLL"));
@@ -1026,7 +1026,7 @@ void MainWindow::onSingleClicked() {
     actStart_->setEnabled(false);
     actSingle_->setEnabled(false);
     actSingle_->setText("等待停止");
-    setStatus(QString("单次采样中: %1 叶子").arg(model_->leafCount()));
+    setStatus(QString("单次采样中: %1 变量").arg(model_->leafCount()));
 }
 
 void MainWindow::onStopClicked() { onStartClicked(); }   /* 旧入口: 转发到切换逻辑 */
@@ -1060,7 +1060,7 @@ void MainWindow::onEngineStopped() {
             actStart_->setText("停止采样");
             actSingle_->setEnabled(false);
             intervalSpin_->setEnabled(false);
-            setStatus(QString("采样中: %1 叶子 @ %2 Hz (%3)")
+            setStatus(QString("采样中: %1 变量 @ %2 Hz (%3)")
                           .arg(model_->leafCount())
                           .arg(rateHz())
                           .arg(engine_->isStreaming() ? "STREAM" : "POLL"));
@@ -1210,7 +1210,10 @@ void MainWindow::onElfReloadFinished() {
         }
         if (lf.shown != st.shown) model_->setLeafShown(li, st.shown);
         if (lf.hex != st.hex) model_->setLeafHex(li, st.hex);
-        if (st.color.isValid() && lf.color != st.color)
+        /* 保存的颜色若已被别的变量占用(旧会话常把一串变量存成同一个
+         * 默认色), 保留新分配的颜色, 不再制造撞色 */
+        if (st.color.isValid() && lf.color != st.color &&
+            !model_->colorUsedByOtherLeaf(st.color, li))
             model_->setLeafColor(li, st.color);
     }
     elfUiState_.clear();
@@ -1377,7 +1380,8 @@ void MainWindow::restoreSessionLeaves(QSettings& s) {
         if (li >= 0 && model_->leaf(li).hex != hex)
             model_->setLeafHex(li, hex);
         if (li >= 0 && savedColor.isValid() &&
-            model_->leaf(li).color != savedColor)
+            model_->leaf(li).color != savedColor &&
+            !model_->colorUsedByOtherLeaf(savedColor, li))
             model_->setLeafColor(li, savedColor);
     }
     s.endArray();

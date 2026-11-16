@@ -681,11 +681,9 @@ DashboardWidget::DashboardWidget(QWidget* parent) : QWidget(parent) {
     emptyHint_ = new QLabel("通过「数据 → 添加组件」创建数值 / 仪表 / 滑块 / 开关 / 数组", canvas_);
     emptyHint_->setAlignment(Qt::AlignCenter);
     emptyHint_->setStyleSheet("background:transparent;border:none;");
-    {
-        QPalette ep = emptyHint_->palette();
-        ep.setColor(QPalette::WindowText, ep.color(QPalette::PlaceholderText));
-        emptyHint_->setPalette(ep);
-    }
+    /* 用调色板角色而不是拷贝颜色: 拷贝出的颜色不会随主题切换更新,
+     * 深色主题下会残留浅色主题的深灰, 文字看不清. */
+    emptyHint_->setForegroundRole(QPalette::PlaceholderText);
     emptyHint_->setAttribute(Qt::WA_TransparentForMouseEvents);
     updateEmptyHint();
 }

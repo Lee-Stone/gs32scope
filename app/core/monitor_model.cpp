@@ -22,9 +22,27 @@ MonitorModel::~MonitorModel() {
     clear();
 }
 
+namespace {
+/* 色相距离(0..180) */
+int hueDist(int a, int b) {
+    const int d = qAbs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+}
+}
+
+bool MonitorModel::colorUsedByOtherLeaf(const QColor& color, int exceptLeafIdx) const {
+    if (!color.isValid()) return false;
+    for (int i = 0; i < leaves_.size(); ++i)
+        if (i != exceptLeafIdx && leaves_[i].color == color) return true;
+    return false;
+}
+
 QColor MonitorModel::nextColor() {
-    /* 前 12 个用高对比调色板; 超过后按黄金角生成新色相,
-     * 并跳过已用颜色, 保证连续添加变量时颜色不重复。 */
+    /* 前 12 个用高对比调色板; 超过后按黄金角生成新色相。
+     * 除了排除"完全相同", 还要排除"看起来相同": 生成的颜色与已用颜色
+     * 色相太近且明度/饱和度也接近时换下一个候选(阈值随尝试次数放宽,
+     * 保证必然终止)。否则粉色撞 #FF5C7A、绿色撞 #2FD858 这类情况
+     * 会让多条波形看起来是同一种颜色。 */
     for (int attempt = 0; attempt < 4096; ++attempt) {
         const int idx = colorIdx_++;
         QColor c;
@@ -37,10 +55,54 @@ QColor MonitorModel::nextColor() {
             const int val = 238 - (n % 2) * 22;
             c = QColor::fromHsv(hue, sat, val);
         }
-        if (c.isValid() && !usedColors_.contains(c.rgba())) {
-            usedColors_.insert(c.rgba());
-            return c;
+        if (!c.isValid() || usedColors_.contains(c.rgba())) continue;
+        /* 感知查重: 与任一已用颜色 (色相<阈值 且 |sat|<45 且 |val|<45) 视为太近 */
+        const int hueThresh = attempt < 1024 ? 14 : (attempt < 2048 ? 9 : 5);
+        bool tooClose = false;
+        for (QRgb used : usedColors_) {
+            const QColor u = QColor::fromRgb(used);
+            if (hueDist(c.hue(), u.hue()) < hueThresh &&
+                qAbs(c.saturation() - u.saturation()) < 45 &&
+                qAbs(c.value() - u.value()) < 45) {
+                tooClose = true;
+                break;
+            }
         }
+        if (tooClose) continue;
+        usedColors_.insert(c.rgba());
+        return c;
+    }
+    /* 兜底: 变量极多、感知阈值下找不到候选时, 在 256 个新候选里选与
+     * 已用颜色"感知距离最远"的一个(色相权重最高), 保证颜色仍然唯一,
+     * 不会退化成默认蓝。 */
+    QColor best;
+    int bestScore = -1;
+    for (int k = 0; k < 256; ++k) {
+        const int idx = colorIdx_++;
+        QColor c;
+        if (idx < kPaletteSize) {
+            c = kColors[idx];
+        } else {
+            const int n = idx - kPaletteSize;
+            const int hue = int(std::fmod(n * 137.508, 360.0));
+            c = QColor::fromHsv(hue, 205 + (n % 3) * 18, 238 - (n % 2) * 22);
+        }
+        int sc = 1 << 30;
+        for (QRgb used : usedColors_) {
+            const QColor u = QColor::fromRgb(used);
+            const int d = hueDist(c.hue(), u.hue()) * 16 +
+                         qAbs(c.saturation() - u.saturation()) +
+                         qAbs(c.value() - u.value());
+            if (d < sc) sc = d;
+        }
+        if (sc > bestScore) {
+            bestScore = sc;
+            best = c;
+        }
+    }
+    if (best.isValid()) {
+        usedColors_.insert(best.rgba());
+        return best;
     }
     return QColor(0x3F, 0xB9, 0xFF);
 }

@@ -90,6 +90,12 @@ private:
     int  addFlatLeaf(const QString& path, const VariableDef& d, int rootIdx);
     QColor nextColor();
 
+public:
+    /* savedColor 是否已被"另一个"叶子占用(exceptLeafIdx 自身不算) */
+    bool colorUsedByOtherLeaf(const QColor& color, int exceptLeafIdx) const;
+
+private:
+
     QVector<MonitorRoot*> roots_;   /* 指针向量: 避免含裸指针的浅拷贝导致悬垂 */
     QVector<MonitorLeaf> leaves_;
     QHash<QString, int>  leafIdx_;
